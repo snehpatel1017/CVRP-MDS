@@ -568,14 +568,14 @@ weight_t get_total_cost_of_routes(const VRP &vrp, vector<vector<node_t>> &final_
 // MAIN POST PROCESS ROUTINE
 //
 std::vector<std::vector<node_t>>
-postProcessIt(const VRP &vrp, std::vector<std::vector<node_t>> &final_routes) {
+postProcessIt(const VRP &vrp, std::vector<std::vector<node_t>> &final_routes, weight_t& minCost) {
   std::vector<std::vector<node_t>> postprocessed_final_routes;
 
   auto postprocessed_final_routes1 = postprocess_tsp_approx(vrp, final_routes);
   auto postprocessed_final_routes2 = postprocess_2OPT(vrp, postprocessed_final_routes1);
   auto postprocessed_final_routes3 = postprocess_2OPT(vrp, final_routes);
 
-  //~ weight_t postprocessed_final_routes_cost;
+  weight_t postprocessed_final_routes_cost = 0;
 
   for (unsigned zzz = 0; zzz < final_routes.size(); ++zzz) {
     // include the better route between postprocessed_final_routes2[zzz] and postprocessed_final_routes3[zzz] in the final solution.
@@ -610,14 +610,17 @@ postProcessIt(const VRP &vrp, std::vector<std::vector<node_t>> &final_routes) {
 
     // postprocessed_route2_cost is lower
     if (postprocessed_route3_cost > postprocessed_route2_cost) {
+      postprocessed_final_routes_cost += postprocessed_route2_cost;
       postprocessed_final_routes.push_back(postprocessed_route2);
     }
     // postprocessed_route3_cost is lower
     else {
+      postprocessed_final_routes_cost += postprocessed_route3_cost;
       postprocessed_final_routes.push_back(postprocessed_route3);
     }
   }
 
+  minCost = postprocessed_final_routes_cost;
   return postprocessed_final_routes;
 }
 
@@ -703,7 +706,7 @@ int main(int argc, char *argv[]) {
   weight_t minCost = INT_MAX * 1.0f;
   std::vector<std::vector<node_t>> minRoute;
 
-  for (int i = 0; i < 100000; ++i) {
+  for (int i = 0; i < 1; ++i) {
     // RANDOMIZE THE ADJ LIST OF MST
     for (auto &list : mstG) {
       std::shuffle(list.begin(), list.end(), std::default_random_engine(rand()));
@@ -728,9 +731,39 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  auto postRoutes = postProcessIt(vrp, minRoute);
-  chrono::high_resolution_clock::time_point end = chrono::high_resolution_clock::now();
+  weight_t min_cost_after_one_iteration = minCost;
+  auto time_till_one_iteration = (double)((chrono::high_resolution_clock::now() - start).count() * 1.E-9);
 
+  for (int i = 1; i < 100000; ++i) {
+    // RANDOMIZE THE ADJ LIST OF MST
+    for (auto &list : mstG) {
+      std::shuffle(list.begin(), list.end(), std::default_random_engine(rand()));
+    }   
+
+    //reset
+    singleRoute.clear();
+
+    std::vector<bool> visited(mstG.size(), false);
+    visited[0] = true;
+
+    ShortCircutTour(mstG, visited, 0, singleRoute);  //a DFS
+    DEBUG std::cout << '\n';
+
+    auto aRoutes = convertToVrpRoutes(vrp, singleRoute);
+
+    auto aCostRoute = calCost(vrp, aRoutes);
+
+    if (aCostRoute.first < minCost) {
+      minCost = aCostRoute.first;
+      minRoute = aCostRoute.second;
+    }   
+  }
+
+  weight_t min_cost_after_super_loop = minCost;
+  auto time_till_super_loop = (double)((chrono::high_resolution_clock::now() - start).count() * 1.E-9);
+
+  auto postRoutes = postProcessIt(vrp, minRoute, minCost);
+  chrono::high_resolution_clock::time_point end = chrono::high_resolution_clock::now();
   uint64_t elapsed = chrono::duration_cast<chrono::nanoseconds>(end - start).count();
   double total_time = (double)(elapsed * 1.E-9);
   std::cerr << argv[1];
@@ -739,12 +772,25 @@ int main(int argc, char *argv[]) {
   bool verified = false;
   verified = verify_sol(vrp, postRoutes, vrp.getCapacity());
   if (verified)
-    cerr << " VALID solution"
-         << " minCost " << minCost << " TIME " << total_time << " second" << endl;
-  else
-    cerr << " INVALID solution"
-         << " TIME " << total_time << " second" << endl;
-
+  {
+    cerr << " Cost " << min_cost_after_one_iteration << " "
+                     << min_cost_after_super_loop    << " "
+                     << minCost;
+    cerr << " Time(seconds) " << time_till_one_iteration << " "
+                              << time_till_super_loop    << " "
+                              << total_time;
+    cerr << " VALID\n";
+  }else
+  {
+    cerr << " Cost " << min_cost_after_one_iteration << " " 
+                     << min_cost_after_super_loop    << " " 
+                     << minCost;
+    cerr << " Time(seconds) " << time_till_one_iteration << " " 
+                              << time_till_super_loop    << " " 
+                              << total_time;
+    cerr << " INVALID\n";
+  }
+  
   // PRINT ANS
   printOutput(vrp, postRoutes);
 
