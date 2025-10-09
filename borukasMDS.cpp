@@ -21,7 +21,7 @@
 #include <deque>
 #include <sstream> //stringstream
 #include <numeric> // For std::iota
-
+#include "delaunator.hpp"
 #include <random>
 #include <chrono> //timing CPU
 
@@ -829,6 +829,108 @@ bool verify_sol(const VRP &vrp, vector<vector<node_t>> final_routes, unsigned ca
     return true;
 }
 
+struct DSU_for_Kruskal
+{
+    std::vector<node_t> parent;
+    DSU_for_Kruskal(size_t n)
+    {
+        parent.resize(n);
+        std::iota(parent.begin(), parent.end(), 0);
+    }
+    node_t find(node_t i)
+    {
+        if (parent[i] == i)
+            return i;
+        return parent[i] = find(parent[i]);
+    }
+    void unite(node_t i, node_t j)
+    {
+        node_t root_i = find(i);
+        node_t root_j = find(j);
+        if (root_i != root_j)
+            parent[root_i] = root_j;
+    }
+};
+
+struct GraphEdge
+{
+    node_t u, v;
+    weight_t weight;
+    bool operator<(const GraphEdge &other) const
+    {
+        return weight < other.weight;
+    }
+};
+
+// O(N log N) EMST algorithm using Delaunay Triangulation + Kruskal's
+std::vector<std::vector<Edge>>
+EMST_Delaunay_Kruskal(const VRP &vrp)
+{
+    auto N = vrp.getSize();
+    if (N == 0)
+        return {};
+
+    // 1. Prepare coordinates for the delaunator library
+    std::vector<double> coords;
+    coords.reserve(N * 2);
+    for (const auto &p : vrp.node)
+    {
+        coords.push_back(p.x);
+        coords.push_back(p.y);
+    }
+
+    // 2. Compute the Delaunay Triangulation (O(N log N))
+    delaunator::Delaunator d(coords);
+
+    // 3. Build the edge list from the triangulation
+    std::vector<GraphEdge> graph_edges;
+    for (std::size_t i = 0; i < d.triangles.size(); i += 3)
+    {
+        node_t p1 = d.triangles[i];
+        node_t p2 = d.triangles[i + 1];
+        node_t p3 = d.triangles[i + 2];
+
+        graph_edges.push_back({p1, p2, vrp.get_dist(p1, p2, false)});
+        graph_edges.push_back({p2, p3, vrp.get_dist(p2, p3, false)});
+        graph_edges.push_back({p3, p1, vrp.get_dist(p3, p1, false)});
+    }
+
+    // =========================================================================
+    // START: FIX
+    // 3.5. Guarantee graph connectivity. The triangulation may be disconnected
+    // for some degenerate inputs. To ensure Kruskal's finds a full spanning
+    // tree, we add edges from the depot to all other nodes. Kruskal's will
+    // only use these edges if necessary to connect components.
+    for (node_t i = 1; i < N; ++i)
+    {
+        graph_edges.push_back({DEPOT, i, vrp.get_dist(DEPOT, i, false)});
+    }
+    // END: FIX
+    // =========================================================================
+
+    // 4. Run Kruskal's algorithm on the (now guaranteed connected) graph
+    std::sort(graph_edges.begin(), graph_edges.end());
+
+    DSU_for_Kruskal dsu(N);
+    std::vector<std::vector<Edge>> nG(N);
+    int edges_in_mst = 0;
+
+    for (const auto &edge : graph_edges)
+    {
+        if (dsu.find(edge.u) != dsu.find(edge.v))
+        {
+            dsu.unite(edge.u, edge.v);
+            nG[edge.u].push_back(Edge(edge.v, edge.weight));
+            nG[edge.v].push_back(Edge(edge.u, edge.weight));
+            edges_in_mst++;
+            if (edges_in_mst == N - 1)
+                break;
+        }
+    }
+
+    return nG;
+}
+
 int main(int argc, char *argv[])
 {
     VRP vrp;
@@ -860,7 +962,7 @@ int main(int argc, char *argv[])
     // =========================================================================
     // MODIFICATION: Replace Prim's with Boruvka's Algorithm
     // =========================================================================
-    auto mstG = BoruvkasAlgo(vrp);
+    auto mstG = EMST_Delaunay_Kruskal(vrp);
     // =========================================================================
 
     std::vector<bool> visited(mstG.size(), false);
@@ -951,19 +1053,21 @@ int main(int argc, char *argv[])
     verified = verify_sol(vrp, postRoutes, vrp.getCapacity());
 
     std::cout << argv[1] << " Cost ";
+    // std::cout << minCost1 << ' ';
     std::cout << "Pre-Refine COST = ";
     std::cout << minCost2 << ',';
-    std::cout << "Final Cost = ";
+    std::cout << "Pre-Processed COST = ";
     std::cout << minCost;
 
-    std::cout << " | Time(s): ";
-    std::cout << "MST = ";
+    // Execution time after Step 1, Step 2 & 3, and Step 4.
+    std::cout << " Time(seconds) ";
+    std::cout << "Time for MST = ";
     std::cout << timeUpto1 << ',';
-    std::cout << "Refinement = ";
+    std::cout << "Time for Middle part = ";
     std::cout << timeUpto2 << ',';
-    std::cout << "Post-Processing = ";
+    std::cout << "Time for Preprocessing = ";
     std::cout << timeUpto3 << ",";
-    std::cout << "Total = ";
+    std::cout << "total time = ";
     std::cout << total_time;
 
     if (verified)
