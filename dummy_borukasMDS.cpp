@@ -57,18 +57,12 @@ class Edge
 {
 public:
     node_t to;
-    weight_t length;
 
     Edge() {}
     ~Edge() {}
-    Edge(node_t t, weight_t l)
+    Edge(node_t t)
     {
         to = t;
-        length = l;
-    }
-    bool operator<(const Edge &e)
-    {
-        return length < e.length;
     }
 };
 
@@ -116,9 +110,7 @@ public:
 
 public:
     vector<Point> node;
-
     Params params;
-
     size_t getSize() const
     {
         return size;
@@ -238,17 +230,19 @@ void printAdjList(const std::vector<std::vector<Edge>> &graph)
 }
 
 // DFS Recursive.
-void ShortCircutTour(std::vector<std::vector<Edge>> &g, std::vector<bool> &visited, node_t u, std::vector<node_t> &out)
+void ShortCircutTour(std::vector<std::vector<int>> &g, std::vector<bool> &visited, node_t u, std::vector<node_t> &out, int *ind)
 {
     visited[u] = true;
     DEBUG std::cout << u << ' ';
-    out.push_back(u);
+    // out.push_back(u);
+    out[*ind] = u;
+    *ind = *ind + 1;
     for (auto e : g[u])
     {
-        node_t v = e.to;
+        node_t v = e;
         if (!visited[v])
         {
-            ShortCircutTour(g, visited, v, out);
+            ShortCircutTour(g, visited, v, out, ind);
         }
     }
 }
@@ -754,7 +748,7 @@ struct GraphEdge
 };
 
 // O(N log N) EMST algorithm using Delaunay Triangulation + Kruskal's
-std::vector<std::vector<Edge>>
+std::vector<std::vector<int>>
 EMST_Delaunay_Kruskal(const VRP &vrp)
 {
     auto N = vrp.getSize();
@@ -803,7 +797,7 @@ EMST_Delaunay_Kruskal(const VRP &vrp)
     std::sort(graph_edges.begin(), graph_edges.end());
 
     DSU_for_Kruskal dsu(N);
-    std::vector<std::vector<Edge>> nG(N);
+    std::vector<std::vector<int>> nG(N);
     int edges_in_mst = 0;
 
     for (const auto &edge : graph_edges)
@@ -811,8 +805,8 @@ EMST_Delaunay_Kruskal(const VRP &vrp)
         if (dsu.find(edge.u) != dsu.find(edge.v))
         {
             dsu.unite(edge.u, edge.v);
-            nG[edge.u].push_back(Edge(edge.v, edge.weight));
-            nG[edge.v].push_back(Edge(edge.u, edge.weight));
+            nG[edge.u].push_back(edge.v);
+            nG[edge.v].push_back(edge.u);
             edges_in_mst++;
             if (edges_in_mst == N - 1)
                 break;
@@ -872,12 +866,13 @@ int main(int argc, char *argv[])
             std::shuffle(list.begin(), list.end(), std::default_random_engine(0));
         }
 
-        std::vector<int> singleRoute;
+        std::vector<int> singleRoute(mstCopy.size());
 
         std::vector<bool> visited(mstCopy.size(), false);
         visited[0] = true;
+        int ind = 0;
 
-        ShortCircutTour(mstCopy, visited, 0, singleRoute);
+        ShortCircutTour(mstCopy, visited, 0, singleRoute, &ind);
         DEBUG std::cout << '\n';
 
         auto aRoutes = Split_convertToVrpRoutes(vrp, singleRoute);
@@ -912,12 +907,12 @@ int main(int argc, char *argv[])
         uint64_t elp = std::chrono::duration_cast<std::chrono::nanoseconds>(en - st).count();
         Middle_Part_Times[0] += (double)(elp * 1.E-9);
 
-        std::vector<int> singleRoute;
+        std::vector<int> singleRoute(mstCopy.size());
         std::vector<bool> visited(mstCopy.size(), false);
         visited[0] = true;
-
+        int ind = 0;
         st = std::chrono::high_resolution_clock::now();
-        ShortCircutTour(mstCopy, visited, 0, singleRoute);
+        ShortCircutTour(mstCopy, visited, 0, singleRoute, &ind);
         DEBUG std::cout << '\n';
         en = std::chrono::high_resolution_clock::now();
         elp = std::chrono::duration_cast<std::chrono::nanoseconds>(en - st).count();

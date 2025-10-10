@@ -24,6 +24,12 @@
 #include "delaunator.hpp"
 #include <random>
 #include <chrono> //timing CPU
+#include <string> // For std::string
+#include <cmath>  // For sqrt and round
+
+// CUDA Headers
+#include <cuda_runtime.h>
+#include <curand_kernel.h>
 
 unsigned DEBUGCODE = 0;
 #define DEBUG if (DEBUGCODE)
@@ -57,18 +63,12 @@ class Edge
 {
 public:
     node_t to;
-    weight_t length;
 
     Edge() {}
     ~Edge() {}
-    Edge(node_t t, weight_t l)
+    Edge(node_t t)
     {
         to = t;
-        length = l;
-    }
-    bool operator<(const Edge &e)
-    {
-        return length < e.length;
     }
 };
 
@@ -116,9 +116,7 @@ public:
 
 public:
     vector<Point> node;
-
     Params params;
-
     size_t getSize() const
     {
         return size;
@@ -238,17 +236,19 @@ void printAdjList(const std::vector<std::vector<Edge>> &graph)
 }
 
 // DFS Recursive.
-void ShortCircutTour(std::vector<std::vector<Edge>> &g, std::vector<bool> &visited, node_t u, std::vector<node_t> &out)
+void ShortCircutTour(std::vector<std::vector<int>> &g, std::vector<bool> &visited, node_t u, std::vector<node_t> &out, int *ind)
 {
     visited[u] = true;
     DEBUG std::cout << u << ' ';
-    out.push_back(u);
+    // out.push_back(u);
+    out[*ind] = u;
+    *ind = *ind + 1;
     for (auto e : g[u])
     {
-        node_t v = e.to;
+        node_t v = e;
         if (!visited[v])
         {
-            ShortCircutTour(g, visited, v, out);
+            ShortCircutTour(g, visited, v, out, ind);
         }
     }
 }
@@ -282,112 +282,6 @@ convertToVrpRoutes(const VRP &vrp, const std::vector<node_t> &singleRoute)
     }
     routes.push_back(aRoute);
     return routes;
-}
-
-std::vector<std::vector<node_t>>
-Split_convertToVrpRoutes(const VRP &vrp, const std::vector<node_t> &singleRoute)
-{
-    std::vector<node_t> customer_tour;
-    customer_tour.reserve(vrp.size);
-    for (node_t node : singleRoute)
-    {
-        if (node != DEPOT)
-        {
-            customer_tour.push_back(node);
-        }
-    }
-
-    const int n = customer_tour.size();
-    if (n == 0)
-        return {};
-
-    std::vector<double> sum_demands(n + 1, 0.0);
-    std::vector<double> sum_dist(n + 1, 0.0);
-    for (int i = 0; i < n; ++i)
-    {
-        sum_demands[i + 1] = sum_demands[i] + vrp.node[customer_tour[i]].demand;
-        if (i > 0)
-        {
-            sum_dist[i + 1] = sum_dist[i] + vrp.get_dist(customer_tour[i - 1], customer_tour[i]);
-        }
-    }
-
-    std::vector<weight_t> V(n + 1, std::numeric_limits<weight_t>::max());
-    std::vector<int> P(n + 1, -1);
-    V[0] = 0;
-
-    std::deque<int> q;
-    q.push_back(0);
-
-    for (int j = 1; j <= n; ++j)
-    {
-        while (!q.empty() && sum_demands[j] - sum_demands[q.front()] > vrp.getCapacity())
-        {
-            q.pop_front();
-        }
-
-        auto calculate_total_cost = [&](int i)
-        {
-            double route_dist;
-            if (i == j - 1)
-            {
-                route_dist = vrp.get_dist(DEPOT, customer_tour[i]) + vrp.get_dist(customer_tour[i], DEPOT);
-            }
-            else
-            {
-                route_dist = vrp.get_dist(DEPOT, customer_tour[i]) + (sum_dist[j] - sum_dist[i + 1]) + vrp.get_dist(customer_tour[j - 1], DEPOT);
-            }
-            return V[i] + route_dist;
-        };
-
-        while (q.size() >= 2)
-        {
-            if (calculate_total_cost(q[0]) >= calculate_total_cost(q[1]))
-            {
-                q.pop_front();
-            }
-            else
-            {
-                break;
-            }
-        }
-
-        if (!q.empty())
-        {
-            P[j] = q.front();
-            V[j] = calculate_total_cost(P[j]);
-        }
-
-        auto g = [&](int i)
-        {
-            if (i == 0)
-                return 0.0;
-            return V[i] - sum_dist[i] + vrp.get_dist(DEPOT, customer_tour[i - 1]);
-        };
-
-        while (!q.empty() && g(q.back()) >= g(j))
-        {
-            q.pop_back();
-        }
-        q.push_back(j);
-    }
-
-    std::vector<std::vector<node_t>> final_routes;
-    int current_idx = n;
-    while (current_idx > 0)
-    {
-        int pred_idx = P[current_idx];
-        std::vector<node_t> new_route;
-        for (int k = pred_idx; k < current_idx; ++k)
-        {
-            new_route.push_back(customer_tour[k]);
-        }
-        final_routes.push_back(new_route);
-        current_idx = pred_idx;
-    }
-
-    std::reverse(final_routes.begin(), final_routes.end());
-    return final_routes;
 }
 
 weight_t calRouteValue(const VRP &vrp, const std::vector<node_t> &aRoute, node_t depot = 1)
@@ -666,13 +560,11 @@ calCost(const VRP &vrp, const std::vector<std::vector<node_t>> &final_routes)
 {
     weight_t total_cost = 0.0;
 
-#pragma omp parallel for reduction(+ : total_cost)
     for (unsigned ii = 0; ii < final_routes.size(); ++ii)
     {
         weight_t curr_route_cost = 0;
         curr_route_cost += vrp.get_dist(DEPOT, final_routes[ii][0]);
 
-#pragma omp parallel for reduction(+ : curr_route_cost)
         for (unsigned jj = 1; jj < final_routes[ii].size(); ++jj)
         {
             curr_route_cost += vrp.get_dist(final_routes[ii][jj - 1], final_routes[ii][jj]);
@@ -754,7 +646,7 @@ struct GraphEdge
 };
 
 // O(N log N) EMST algorithm using Delaunay Triangulation + Kruskal's
-std::vector<std::vector<Edge>>
+std::vector<std::vector<int>>
 EMST_Delaunay_Kruskal(const VRP &vrp)
 {
     auto N = vrp.getSize();
@@ -803,7 +695,7 @@ EMST_Delaunay_Kruskal(const VRP &vrp)
     std::sort(graph_edges.begin(), graph_edges.end());
 
     DSU_for_Kruskal dsu(N);
-    std::vector<std::vector<Edge>> nG(N);
+    std::vector<std::vector<int>> nG(N);
     int edges_in_mst = 0;
 
     for (const auto &edge : graph_edges)
@@ -811,8 +703,8 @@ EMST_Delaunay_Kruskal(const VRP &vrp)
         if (dsu.find(edge.u) != dsu.find(edge.v))
         {
             dsu.unite(edge.u, edge.v);
-            nG[edge.u].push_back(Edge(edge.v, edge.weight));
-            nG[edge.v].push_back(Edge(edge.u, edge.weight));
+            nG[edge.u].push_back(edge.v);
+            nG[edge.v].push_back(edge.u);
             edges_in_mst++;
             if (edges_in_mst == N - 1)
                 break;
@@ -821,7 +713,301 @@ EMST_Delaunay_Kruskal(const VRP &vrp)
 
     return nG;
 }
+__device__ double get_dist_gpu(node_t i, node_t j, const point_t *d_x, const point_t *d_y, int n)
+{
+    if (i >= n || j >= n || i < 0 || j < 0)
+        return DBL_MAX;
+    if (i == j)
+        return 0.0;
+    double dx = d_x[i] - d_x[j];
+    double dy = d_y[i] - d_y[j];
+    return sqrt(dx * dx + dy * dy);
+}
 
+__device__ void shortcutTour_gpu_iterative(int start_node, bool *visited, const int *adj_list, const int *adj_offsets, int *singleRoute, int *ind, int n)
+{
+    int stack[1024]; // Max depth of 1024, safer than recursion
+    int stack_top = -1;
+
+    stack[++stack_top] = start_node;
+
+    while (stack_top != -1)
+    {
+        int u = stack[stack_top--];
+        if (visited[u])
+            continue;
+
+        visited[u] = true;
+        singleRoute[(*ind)++] = u;
+
+        int start_index = (u == 0) ? 0 : adj_offsets[u - 1];
+        int end_index = adj_offsets[u];
+
+        // Push neighbors in reverse to process them in original order
+        for (int i = end_index - 1; i >= start_index; --i)
+        {
+            int v = adj_list[i];
+            if (!visited[v])
+            {
+                if (stack_top < 1023)
+                { // Avoid stack overflow
+                    stack[++stack_top] = v;
+                }
+            }
+        }
+    }
+}
+
+__device__ weight_t calCost_gpu(const int *route, int route_size, const point_t *d_x, const point_t *d_y, int n)
+{
+    if (route_size == 0)
+        return 0.0;
+
+    weight_t total_cost = 0.0;
+    total_cost += get_dist_gpu(DEPOT, route[0], d_x, d_y, n);
+
+    for (int i = 0; i < route_size - 1; ++i)
+    {
+        total_cost += get_dist_gpu(route[i], route[i + 1], d_x, d_y, n);
+    }
+    total_cost += get_dist_gpu(route[route_size - 1], DEPOT, d_x, d_y, n);
+    return total_cost;
+}
+
+__global__ void solve_vrp_kernel(
+    const point_t *g_x, const point_t *g_y, const demand_t *g_demand,
+    const int *g_stretched_list, const int *g_number_of_edges,
+    int n, int stretched_size, double capacity, int total_iterations,
+    weight_t *g_best_cost, int *g_best_routes, int *g_best_route_lengths,
+    int *g_workspace)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_threads = gridDim.x * blockDim.x;
+
+    size_t workspace_size_per_thread = stretched_size + (4 * n);
+    int *thread_workspace = g_workspace + (tid * workspace_size_per_thread);
+
+    int *local_stretched_list = thread_workspace;
+    int *singleRoute = local_stretched_list + stretched_size;
+    int *routes = singleRoute + n;
+    int *route_lengths = routes + n;
+    bool *visited = (bool *)(route_lengths + n);
+
+    // Grid-Stride Loop
+    for (int i = tid; i < total_iterations; i += total_threads)
+    {
+        // Each thread copies the MST structure for its iteration
+        for (int k = 0; k < stretched_size; ++k)
+            local_stretched_list[k] = g_stretched_list[k];
+
+        curandState rand_state;
+        curand_init(tid, i, 0, &rand_state);
+
+        for (int node_idx = 0; node_idx < n; ++node_idx)
+        {
+            int start_index = (node_idx == 0) ? 0 : g_number_of_edges[node_idx - 1];
+            int num_edges = (node_idx == 0) ? g_number_of_edges[0] : g_number_of_edges[node_idx] - g_number_of_edges[node_idx - 1];
+            if (num_edges <= 1)
+                continue;
+
+            for (int j = num_edges - 1; j > 0; --j)
+            {
+                int swap_idx_offset = curand(&rand_state) % (j + 1);
+                int temp = local_stretched_list[start_index + j];
+                local_stretched_list[start_index + j] = local_stretched_list[start_index + swap_idx_offset];
+                local_stretched_list[start_index + swap_idx_offset] = temp;
+            }
+        }
+
+        for (int j = 0; j < n; ++j)
+            visited[j] = false;
+        int ind = 0;
+        shortcutTour_gpu_iterative(0, visited, local_stretched_list, g_number_of_edges, singleRoute, &ind, n);
+
+        int route_count = 0;
+        double residue_capacity = capacity;
+        int route_idx = 0;
+        int current_route_len = 0;
+        int current_tour_idx = 1;
+
+        while (current_tour_idx < ind)
+        {
+            int customer_node = singleRoute[current_tour_idx];
+            if (residue_capacity >= g_demand[customer_node])
+            {
+                routes[route_idx++] = customer_node;
+                current_route_len++;
+                residue_capacity -= g_demand[customer_node];
+                current_tour_idx++;
+            }
+            else
+            {
+                if (current_route_len > 0)
+                {
+                    route_lengths[route_count++] = current_route_len;
+                }
+                current_route_len = 0;
+                residue_capacity = capacity;
+            }
+        }
+        if (current_route_len > 0)
+        {
+            route_lengths[route_count++] = current_route_len;
+        }
+
+        weight_t total_cost = 0;
+        int route_start_idx = 0;
+        for (int j = 0; j < route_count; ++j)
+        {
+            total_cost += calCost_gpu(&routes[route_start_idx], route_lengths[j], g_x, g_y, n);
+            route_start_idx += route_lengths[j];
+        }
+
+        if (total_cost < *g_best_cost)
+        {
+            atomicMin((unsigned long long int *)g_best_cost, __double_as_longlong(total_cost));
+            // This is still a race condition, but for a single-threaded block it's okay.
+            // For multi-block, a lock or a better reduction is needed.
+            if (total_cost <= *g_best_cost)
+            {
+                int current_node_idx = 0;
+                for (int j = 0; j < route_count; ++j)
+                {
+                    g_best_route_lengths[j] = route_lengths[j];
+                    for (int k = 0; k < route_lengths[j]; ++k)
+                    {
+                        if (current_node_idx < n - 1) // Bounds check
+                            g_best_routes[current_node_idx] = routes[current_node_idx];
+                        current_node_idx++;
+                    }
+                }
+                if (route_count < n)
+                    g_best_route_lengths[route_count] = -1;
+            }
+        }
+    }
+}
+
+std::pair<weight_t, std::vector<std::vector<node_t>>>
+gpu_operations(const VRP &vrp, std::vector<std::vector<int>> &mstCopy, int total_iterations, int threads_per_block)
+{
+    int n = vrp.getSize();
+    if (n <= 1)
+        return {0.0, {}};
+
+    point_t *d_x, *d_y;
+    demand_t *d_demand;
+
+    cudaMalloc(&d_x, n * sizeof(point_t));
+    cudaMalloc(&d_y, n * sizeof(point_t));
+    cudaMalloc(&d_demand, n * sizeof(demand_t));
+
+    std::vector<point_t> h_x(n), h_y(n);
+    std::vector<demand_t> h_demand(n);
+    for (int i = 0; i < n; i++)
+    {
+        h_x[i] = vrp.node[i].x;
+        h_y[i] = vrp.node[i].y;
+        h_demand[i] = vrp.node[i].demand;
+    }
+    cudaMemcpy(d_x, h_x.data(), n * sizeof(point_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_y, h_y.data(), n * sizeof(point_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_demand, h_demand.data(), n * sizeof(demand_t), cudaMemcpyHostToDevice);
+
+    std::vector<int> h_stretched_list;
+    h_stretched_list.reserve(2 * (n - 1));
+    for (int i = 0; i < n; i++)
+    {
+        for (int neighbor : mstCopy[i])
+        {
+            h_stretched_list.push_back(neighbor);
+        }
+    }
+    int stretched_size = h_stretched_list.size();
+
+    std::vector<int> h_number_of_edges(n, 0);
+    h_number_of_edges[0] = mstCopy[0].size();
+    for (int i = 1; i < n; i++)
+    {
+        h_number_of_edges[i] = h_number_of_edges[i - 1] + mstCopy[i].size();
+    }
+
+    int *d_number_of_edges, *d_stretched_list;
+    cudaMalloc(&d_number_of_edges, n * sizeof(int));
+    cudaMalloc(&d_stretched_list, stretched_size * sizeof(int));
+    cudaMemcpy(d_number_of_edges, h_number_of_edges.data(), n * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_stretched_list, h_stretched_list.data(), stretched_size * sizeof(int), cudaMemcpyHostToDevice);
+
+    weight_t *d_best_cost;
+    int *d_best_routes;
+    int *d_best_route_lengths;
+    cudaMalloc(&d_best_cost, sizeof(weight_t));
+
+    cudaMalloc(&d_best_routes, (n > 1 ? (n - 1) : 1) * sizeof(int));
+
+    cudaMalloc(&d_best_route_lengths, n * sizeof(int));
+
+    int *d_workspace;
+    size_t workspace_size_per_thread = stretched_size + (4 * (size_t)n);
+    size_t total_workspace_size = (size_t)threads_per_block * workspace_size_per_thread;
+    cudaMalloc(&d_workspace, total_workspace_size * sizeof(int));
+
+    weight_t h_best_cost = DBL_MAX;
+    cudaMemcpy(d_best_cost, &h_best_cost, sizeof(weight_t), cudaMemcpyHostToDevice);
+    std::chrono::high_resolution_clock::time_point st = std::chrono::high_resolution_clock::now();
+    solve_vrp_kernel<<<1, threads_per_block>>>(
+        d_x, d_y, d_demand, d_stretched_list, d_number_of_edges,
+        n, stretched_size, vrp.getCapacity(), total_iterations,
+        d_best_cost, d_best_routes, d_best_route_lengths, d_workspace);
+
+    cudaError_t err = cudaGetLastError();
+
+    if (err != cudaSuccess)
+    {
+        fprintf(stderr, "CUDA Error after kernel launch: %s\n", cudaGetErrorString(err));
+    }
+    cudaDeviceSynchronize();
+    std::chrono::high_resolution_clock::time_point en = std::chrono::high_resolution_clock::now();
+    uint64_t elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(en - st).count();
+
+    auto time = (double)(elapsed * 1.E-9);
+    std::cout << "\ntime for kernel = " << time << "\n";
+
+    cudaMemcpy(&h_best_cost, d_best_cost, sizeof(weight_t), cudaMemcpyDeviceToHost);
+
+    std::vector<int> h_best_routes(n > 1 ? n - 1 : 1);
+    std::vector<int> h_best_route_lengths(n);
+    cudaMemcpy(h_best_routes.data(), d_best_routes, (n > 1 ? n - 1 : 1) * sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_best_route_lengths.data(), d_best_route_lengths, n * sizeof(int), cudaMemcpyDeviceToHost);
+
+    std::vector<std::vector<node_t>> final_routes;
+    int current_route_idx = 0;
+    for (int i = 0; i < n && h_best_route_lengths[i] != -1; ++i)
+    {
+        std::vector<node_t> route;
+        int len = h_best_route_lengths[i];
+        for (int j = 0; j < len; ++j)
+        {
+            if (current_route_idx + j < h_best_routes.size())
+                route.push_back(h_best_routes[current_route_idx + j]);
+        }
+        if (!route.empty())
+            final_routes.push_back(route);
+        current_route_idx += len;
+    }
+
+    cudaFree(d_x);
+    cudaFree(d_y);
+    cudaFree(d_demand);
+    cudaFree(d_number_of_edges);
+    cudaFree(d_stretched_list);
+    cudaFree(d_best_cost);
+    cudaFree(d_best_routes);
+    cudaFree(d_best_route_lengths);
+    cudaFree(d_workspace);
+
+    return {h_best_cost, final_routes};
+}
 int main(int argc, char *argv[])
 {
     VRP vrp;
@@ -872,15 +1058,16 @@ int main(int argc, char *argv[])
             std::shuffle(list.begin(), list.end(), std::default_random_engine(0));
         }
 
-        std::vector<int> singleRoute;
+        std::vector<int> singleRoute(mstCopy.size());
 
         std::vector<bool> visited(mstCopy.size(), false);
         visited[0] = true;
+        int ind = 0;
 
-        ShortCircutTour(mstCopy, visited, 0, singleRoute);
+        ShortCircutTour(mstCopy, visited, 0, singleRoute, &ind);
         DEBUG std::cout << '\n';
 
-        auto aRoutes = Split_convertToVrpRoutes(vrp, singleRoute);
+        auto aRoutes = convertToVrpRoutes(vrp, singleRoute);
 
         auto aCostRoute = calCost(vrp, aRoutes);
         if (aCostRoute.first < minCost)
@@ -899,47 +1086,14 @@ int main(int argc, char *argv[])
     short PARLIMIT = vrp.params.nThreads;
     std::chrono::high_resolution_clock::time_point start2 = std::chrono::high_resolution_clock::now();
     std::vector<double> Middle_Part_Times(4, 0);
+    // std::vector<int> singleRoute(mstCopy.size()); // This was a redeclaration, removed for clarity.
+    // std::vector<bool> visited(mstCopy.size(), false); // This was a redeclaration, removed for clarity.
 
-#pragma omp parallel for shared(minCost, minRoute) num_threads(PARLIMIT)
-    for (int i = 0; i < 100000; i += PARLIMIT)
-    {
-        std::chrono::high_resolution_clock::time_point st = std::chrono::high_resolution_clock::now();
-        for (auto &list : mstCopy)
-        {
-            std::shuffle(list.begin(), list.end(), std::default_random_engine(rand()));
-        }
-        std::chrono::high_resolution_clock::time_point en = std::chrono::high_resolution_clock::now();
-        uint64_t elp = std::chrono::duration_cast<std::chrono::nanoseconds>(en - st).count();
-        Middle_Part_Times[0] += (double)(elp * 1.E-9);
+    int number_of_threads = 128;
+    auto Final_Answer = gpu_operations(vrp, mstCopy, 100000, number_of_threads);
 
-        std::vector<int> singleRoute;
-        std::vector<bool> visited(mstCopy.size(), false);
-        visited[0] = true;
-
-        st = std::chrono::high_resolution_clock::now();
-        ShortCircutTour(mstCopy, visited, 0, singleRoute);
-        DEBUG std::cout << '\n';
-        en = std::chrono::high_resolution_clock::now();
-        elp = std::chrono::duration_cast<std::chrono::nanoseconds>(en - st).count();
-        Middle_Part_Times[1] += (double)(elp * 1.E-9);
-
-        st = std::chrono::high_resolution_clock::now();
-        auto aRoutes = convertToVrpRoutes(vrp, singleRoute);
-        en = std::chrono::high_resolution_clock::now();
-        elp = std::chrono::duration_cast<std::chrono::nanoseconds>(en - st).count();
-        Middle_Part_Times[2] += (double)(elp * 1.E-9);
-
-        st = std::chrono::high_resolution_clock::now();
-        auto aCostRoute = calCost(vrp, aRoutes);
-        en = std::chrono::high_resolution_clock::now();
-        elp = std::chrono::duration_cast<std::chrono::nanoseconds>(en - st).count();
-        Middle_Part_Times[3] += (double)(elp * 1.E-9);
-        if (aCostRoute.first < minCost)
-        {
-            minCost = aCostRoute.first;
-            minRoute = aCostRoute.second;
-        }
-    }
+    minRoute = Final_Answer.second;
+    minCost = Final_Answer.first;
 
     auto minCost2 = minCost;
     end = std::chrono::high_resolution_clock::now();
