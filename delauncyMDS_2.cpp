@@ -23,6 +23,7 @@
 #include <numeric> // For std::iota
 #include "delaunator.hpp"
 #include <random>
+#include <queue>
 #include <chrono> //timing CPU
 
 unsigned DEBUGCODE = 0;
@@ -240,19 +241,34 @@ void printAdjList(const std::vector<std::vector<Edge>> &graph)
 // DFS Recursive.
 void ShortCircutTour(std::vector<std::vector<Edge>> &g, std::vector<bool> &visited, node_t u, std::vector<node_t> &out)
 {
+    std::queue<node_t> q;
+
+    // Start the BFS from the initial node 'u'
+    // The 'visited' check before the call in the main loop already ensures 'u' is correctly handled,
+    // but good practice for a standalone BFS is to mark the source as visited.
+    q.push(u);
     visited[u] = true;
-    DEBUG std::cout << u << ' ';
-    out.push_back(u);
-    for (auto e : g[u])
+
+    while (!q.empty())
     {
-        node_t v = e.to;
-        if (!visited[v])
+        node_t currentNode = q.front();
+        q.pop();
+
+        DEBUG std::cout << currentNode << ' ';
+        out.push_back(currentNode);
+
+        // Explore neighbors
+        for (const auto &edge : g[currentNode])
         {
-            ShortCircutTour(g, visited, v, out);
+            node_t neighbor = edge.to;
+            if (!visited[neighbor])
+            {
+                visited[neighbor] = true;
+                q.push(neighbor);
+            }
         }
     }
 }
-
 // Converts a permutation to set of routes
 std::vector<std::vector<node_t>>
 convertToVrpRoutes(const VRP &vrp, const std::vector<node_t> &singleRoute)
@@ -963,30 +979,30 @@ int main(int argc, char *argv[])
     std::cout << argv[1] << " Cost ";
     // std::cout << minCost1 << ' ';
     std::cout << "Pre-Refine COST = ";
-    std::cout << minCost2 << ',';
+    std::cout << minCost2 << '\n';
     std::cout << "Pre-Processed COST = ";
-    std::cout << minCost;
+    std::cout << minCost << "\n";
 
     // Execution time after Step 1, Step 2 & 3, and Step 4.
     std::cout << " Time(seconds) ";
     std::cout << "Time for MST = ";
-    std::cout << timeUpto1 << ',';
+    std::cout << timeUpto1 << '\n';
     std::cout << "Time for Middle part = ";
-    std::cout << timeUpto2 << ',';
+    std::cout << timeUpto2 << '\n';
     std::cout << "Time for Preprocessing = ";
-    std::cout << timeUpto3 << ",";
+    std::cout << timeUpto3 << "\n";
     std::cout << "total time = ";
-    std::cout << total_time;
+    std::cout << total_time << "\n";
 
     // middle part time breakdowns
     std::cout << "Time for shuffle = ";
-    std::cout << Middle_Part_Times[0] << ",";
+    std::cout << Middle_Part_Times[0] << "\n";
     std::cout << "Time for ShortCircutTour = ";
-    std::cout << Middle_Part_Times[1] << ",";
+    std::cout << Middle_Part_Times[1] << "\n";
     std::cout << "Time for Split_convertToVrpRoutes = ";
-    std::cout << Middle_Part_Times[2] << ",";
+    std::cout << Middle_Part_Times[2] << "\n";
     std::cout << "Time for calCost = ";
-    std::cout << Middle_Part_Times[3] << ",";
+    std::cout << Middle_Part_Times[3] << "\n";
 
     if (verified)
         std::cout << " VALID" << std::endl;
