@@ -871,6 +871,8 @@ int main(int argc, char *argv[])
     std::cout << timeUpto3 << "\n";
     std::cout << "total time = ";
     std::cout << total_time << "\n";
+    std::cout << "number of routes = ";
+    std::cout << postRoutes.size() << "\n";
 
     // middle part time breakdowns
     std::cout << "Time for shuffle = ";

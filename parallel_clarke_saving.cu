@@ -129,20 +129,41 @@ weight_t calCost(const VRP &vrp, const std::vector<std::vector<node_t>> &routes)
     return total_cost;
 }
 
-bool verify_sol(const VRP &vrp, const std::vector<std::vector<node_t>> &routes)
+bool verify_sol(const VRP &vrp, vector<vector<node_t>> final_routes, unsigned capacity)
 {
-    for (const auto &route : routes)
+    /* verifies if the solution is valid or not */
+    /**
+     * 1. All vertices appear in the solution exactly once.
+     * 2. For every route, the capacity constraint is respected.
+     **/
+
+    unsigned *hist = (unsigned *)malloc(sizeof(unsigned) * vrp.getSize());
+    memset(hist, 0, sizeof(unsigned) * vrp.getSize());
+
+    for (unsigned i = 0; i < final_routes.size(); ++i)
     {
-        demand_t route_demand = 0;
-        for (node_t customer : route)
+        unsigned route_sum_of_demands = 0;
+        for (unsigned j = 0; j < final_routes[i].size(); ++j)
         {
-            if (customer < 0 || customer >= vrp.size)
-                return false; // Invalid node
-            route_demand += vrp.node[customer].demand;
+            //~ route_sum_of_demands += points.demands[final_routes[i][j]];
+            route_sum_of_demands += vrp.node[final_routes[i][j]].demand;
+            hist[final_routes[i][j]] += 1;
         }
-        if (route_demand > vrp.getCapacity())
+        if (route_sum_of_demands > capacity)
         {
-            return false; // Capacity violated
+            return false;
+        }
+    }
+
+    for (unsigned i = 1; i < vrp.getSize(); ++i)
+    {
+        if (hist[i] > 1)
+        {
+            return false;
+        }
+        if (hist[i] == 0)
+        {
+            return false;
         }
     }
     return true;
@@ -325,7 +346,7 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
 
         node_t i = h_result.i;
         node_t j = h_result.j;
-        // std::cout << i << " " << j << "\n"
+        // std::cout << i << " " << j << "\n";
 
         node_t route_id_i = h_customer_route_map[i];
         node_t route_id_j = h_customer_route_map[j];
@@ -665,7 +686,16 @@ int main(int argc, char *argv[])
     weight_t total_cost = calCost(vrp, routes);
     auto postRoutes = postProcessIt(vrp, routes, total_cost);
     total_cost = calCost(vrp, postRoutes);
-    bool is_valid = verify_sol(vrp, postRoutes);
+    bool is_valid = verify_sol(vrp, postRoutes, vrp.getCapacity());
+    for (auto &route : postRoutes)
+    {
+        std::cout << "Route: 0 ";
+        for (auto &node : route)
+        {
+            std::cout << node << " ";
+        }
+        std::cout << "0\n";
+    }
 
     std::cout << "--- Parallel Clarke & Wright Savings Algorithm ---" << std::endl;
     std::cout << "Problem File: " << argv[1] << std::endl;

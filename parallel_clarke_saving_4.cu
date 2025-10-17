@@ -40,6 +40,7 @@ struct Saving
 {
     volatile int i, j;
     volatile double value;
+    volatile int route_id_i, route_id_j;
 };
 
 class VRP
@@ -132,20 +133,41 @@ weight_t calCost(const VRP &vrp, const std::vector<std::vector<node_t>> &routes)
     return total_cost;
 }
 
-bool verify_sol(const VRP &vrp, const std::vector<std::vector<node_t>> &routes)
+bool verify_sol(const VRP &vrp, vector<vector<node_t>> final_routes, unsigned capacity)
 {
-    for (const auto &route : routes)
+    /* verifies if the solution is valid or not */
+    /**
+     * 1. All vertices appear in the solution exactly once.
+     * 2. For every route, the capacity constraint is respected.
+     **/
+
+    unsigned *hist = (unsigned *)malloc(sizeof(unsigned) * vrp.getSize());
+    memset(hist, 0, sizeof(unsigned) * vrp.getSize());
+
+    for (unsigned i = 0; i < final_routes.size(); ++i)
     {
-        demand_t route_demand = 0;
-        for (node_t customer : route)
+        unsigned route_sum_of_demands = 0;
+        for (unsigned j = 0; j < final_routes[i].size(); ++j)
         {
-            if (customer < 0 || customer >= vrp.size)
-                return false; // Invalid node
-            route_demand += vrp.node[customer].demand;
+            //~ route_sum_of_demands += points.demands[final_routes[i][j]];
+            route_sum_of_demands += vrp.node[final_routes[i][j]].demand;
+            hist[final_routes[i][j]] += 1;
         }
-        if (route_demand > vrp.getCapacity())
+        if (route_sum_of_demands > capacity)
         {
-            return false; // Capacity violated
+            return false;
+        }
+    }
+
+    for (unsigned i = 1; i < vrp.getSize(); ++i)
+    {
+        if (hist[i] > 1)
+        {
+            return false;
+        }
+        if (hist[i] == 0)
+        {
+            return false;
         }
     }
     return true;
@@ -206,6 +228,10 @@ __global__ void find_best_saving_kernel(
     {
         return;
     }
+    if (!(i == back_i && j == front_j) && !(j == back_j && i == front_i))
+    {
+        return;
+    }
 
     // --- 3. Calculate saving if the merge is valid ---
     weight_t saving_value = dist_to_depot[i]                             // dist(i, depot)
@@ -231,6 +257,8 @@ __global__ void find_best_saving_kernel(
             // Now this thread has the exclusive right to update the i and j indices.
             best_saving_out->i = i;
             best_saving_out->j = j;
+            best_saving_out->route_id_i = route_id_i;
+            best_saving_out->route_id_j = route_id_j;
             break; // Success, exit the loop.
         }
 
@@ -247,6 +275,7 @@ __global__ void update_gpu_mempory(
     node_t *next_customer,
     node_t *prev_customer,
     node_t *temporary,
+    Saving *best_saving_out,
     int num_customers,
     node_t i,
     node_t j,
@@ -258,10 +287,12 @@ __global__ void update_gpu_mempory(
     node_t tail_j)
 {
     cg::grid_group grid = cg::this_grid();
+
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int total_threads = blockDim.x * gridDim.x;
     if (tid == 0)
     {
+
         if (type == 1)
         {
             next_customer[i] = j;
@@ -274,73 +305,16 @@ __global__ void update_gpu_mempory(
             prev_customer[i] = j;
             route_head[route_id_i] = head_j;
         }
-        else if (type == 3)
-        {
-            next_customer[j] = prev_customer[j];
-            next_customer[i] = j;
-            prev_customer[j] = i;
-            route_tail[route_id_i] = head_j;
-            customer_route_map[j] = route_id_i;
-        }
-        else
-        {
-            prev_customer[i] = next_customer[i];
-            next_customer[j] = i;
-            prev_customer[i] = j;
-            route_head[route_id_i] = tail_j;
-        }
 
         route_demands[route_id_i] += route_demands[route_id_j];
+        route_demands[route_id_j] = 0;
     }
-    grid.sync();
 
-    if (type == 3)
-    {
-        for (node_t curr = tid; curr < num_customers; curr += total_threads)
-        {
-            if (customer_route_map[curr] == route_id_j)
-            {
-                temporary[curr] = prev_customer[curr];
-            }
-        }
-        grid.sync();
-
-        for (node_t curr = tid; curr < num_customers; curr += total_threads)
-        {
-            if (customer_route_map[curr] == route_id_j)
-            {
-                prev_customer[curr] = next_customer[curr];
-                next_customer[curr] = temporary[curr];
-            }
-        }
-    }
-    else if (type == 4)
-    {
-        for (node_t curr = tid; curr < num_customers; curr += total_threads)
-        {
-            if (curr == i)
-                continue;
-            if (customer_route_map[curr] == route_id_i)
-            {
-                temporary[curr] = prev_customer[curr];
-            }
-        }
-        grid.sync();
-        for (node_t curr = tid; curr < num_customers; curr += total_threads)
-        {
-            if (curr == i)
-                continue;
-            if (customer_route_map[curr] == route_id_i)
-            {
-                prev_customer[curr] = next_customer[curr];
-                next_customer[curr] = temporary[curr];
-                customer_route_map[curr] = route_id_i;
-            }
-        }
-    }
     grid.sync();
-    for (node_t curr = tid; curr < num_customers; curr += total_threads)
+    for (node_t curr = tid; curr <= num_customers; curr += total_threads)
     {
+        if (curr == 0)
+            continue;
         if (customer_route_map[curr] == route_id_j)
         {
             customer_route_map[curr] = route_id_i;
@@ -349,6 +323,11 @@ __global__ void update_gpu_mempory(
     if (tid == 0)
     {
         route_head[route_id_j] = DEPOT;
+        best_saving_out->value = 0;
+        best_saving_out->i = -1;
+        best_saving_out->j = -1;
+        best_saving_out->route_id_i = -1;
+        best_saving_out->route_id_j = -1;
     }
 }
 
@@ -363,6 +342,7 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
     std::vector<node_t> h_route_tail(NUM_CUSTOMERS + 1);
     std::vector<node_t> h_next_customer(vrp.size, DEPOT);
     std::vector<node_t> h_prev_customer(vrp.size, DEPOT);
+    std::vector<node_t> temporary(vrp.size, DEPOT);
 
     for (int i = 1; i <= NUM_CUSTOMERS; ++i)
     {
@@ -407,7 +387,7 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
     checkCudaErrors(cudaMemcpy(d_prev_customer, h_prev_customer.data(), vrp.size * sizeof(node_t), cudaMemcpyHostToDevice));
     checkCudaErrors(cudaMemcpy(d_dist_to_depot, vrp.dist_to_depot.data(), (NUM_CUSTOMERS + 1) * sizeof(weight_t), cudaMemcpyHostToDevice));
     // Initialize the output struct on the GPU to a known "worst" state
-    Saving h_best_saving_init = {-1, -1, -DBL_MAX};
+    Saving h_best_saving_init = {-1, -1, -DBL_MAX, -1, -1};
     checkCudaErrors(cudaMemcpy(d_best_saving_out, &h_best_saving_init, sizeof(Saving), cudaMemcpyHostToDevice));
 
     // --- 4. KERNEL LAUNCH ---
@@ -428,11 +408,14 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
         // std::cout << id++ << "\n";
 
         id++;
-        checkCudaErrors(cudaMemcpy(d_best_saving_out, &h_best_saving_init, sizeof(Saving), cudaMemcpyHostToDevice));
+        auto st = std::chrono::high_resolution_clock::now();
         find_best_saving_kernel<<<numBlocks, threadsPerBlock>>>(
             d_nodes, d_customer_route_map, d_route_demands, d_route_head, d_route_tail, d_dist_to_depot,
             d_best_saving_out, NUM_CUSTOMERS, CAPACITY);
         checkCudaErrors(cudaDeviceSynchronize());
+        auto en = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> diff = en - st;
+        std::cout << "Kernel-1 Time: " << diff.count() << " s\n";
 
         checkCudaErrors(cudaMemcpy(&h_result, d_best_saving_out, sizeof(Saving), cudaMemcpyDeviceToHost));
         if (h_result.value <= 1e-6)
@@ -444,10 +427,10 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
 
         node_t i = h_result.i;
         node_t j = h_result.j;
-        std::cout << i << " " << j << "\n";
+        // std::cout << i << " " << j << "\n";
 
-        node_t route_id_i = h_customer_route_map[i];
-        node_t route_id_j = h_customer_route_map[j];
+        node_t route_id_i = h_result.route_id_i;
+        node_t route_id_j = h_result.route_id_j;
 
         // Check if the merge is valid (different routes and combined demand is within capacity)
         if (route_id_i != route_id_j && h_route_demands[route_id_i] + h_route_demands[route_id_j] <= vrp.capacity)
@@ -462,7 +445,8 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
 
             if (tail_i == i && head_j == j)
             {
-
+                // h_next_customer[i] = j;
+                // h_prev_customer[j] = i;
                 h_route_tail[route_id_i] = tail_j; // New tail is old tail of j
                 merged = true;
                 type = 1;
@@ -470,26 +454,11 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
             // Case 2: Tail of route j connects to Head of route i [...j] -> [i...]
             else if (tail_j == j && head_i == i)
             {
-
+                // h_next_customer[j] = i;
+                // h_prev_customer[i] = j;
                 h_route_head[route_id_i] = head_j; // New head is old head of j
                 merged = true;
                 type = 2;
-            }
-            // Case 3: Tail of i connects to Tail of j [...i] -> [...j](reversed)
-            else if (tail_i == i && tail_j == j)
-            {
-
-                h_route_tail[route_id_i] = head_j; // New tail is old head of j
-                merged = true;
-                type = 3;
-            }
-            // Case 4: Head of i connects to Head of j [i...](reversed) <- [j...]
-            else if (head_i == i && head_j == j)
-            {
-
-                h_route_head[route_id_i] = tail_j; // New head is old tail of j
-                merged = true;
-                type = 4;
             }
 
             if (merged)
@@ -497,8 +466,10 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
 
                 h_route_demands[route_id_i] += h_route_demands[route_id_j];
                 h_route_demands[route_id_j] = 0;
-                h_customer_route_map[j] = route_id_i;
+                // h_customer_route_map[j] = route_id_i;
                 h_route_head[route_id_j] = DEPOT;
+                h_route_tail[route_id_j] = DEPOT;
+                st = std::chrono::high_resolution_clock::now();
                 void *args[] = {
                     (void *)&type,
                     &d_customer_route_map,
@@ -508,6 +479,7 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
                     &d_next_customer,
                     &d_prev_customer,
                     &d_temporary,
+                    &d_best_saving_out,
                     (void *)&NUM_CUSTOMERS,
                     (void *)&i,
                     (void *)&j,
@@ -524,6 +496,10 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
                     threads_per_block,
                     args));
                 checkCudaErrors(cudaDeviceSynchronize());
+                en = std::chrono::high_resolution_clock::now();
+                std::chrono::duration<double> diff = en - st;
+                std::cout << "Kernel-2 Time: " << diff.count() << " s\n";
+                break;
             }
         }
     }
@@ -535,7 +511,7 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
     checkCudaErrors(cudaMemcpy(h_route_tail.data(), d_route_tail, (NUM_CUSTOMERS + 1) * sizeof(node_t), cudaMemcpyDeviceToHost));
     checkCudaErrors(cudaMemcpy(h_next_customer.data(), d_next_customer, vrp.size * sizeof(node_t), cudaMemcpyDeviceToHost));
     checkCudaErrors(cudaMemcpy(h_prev_customer.data(), d_prev_customer, vrp.size * sizeof(node_t), cudaMemcpyDeviceToHost));
-
+    std::cout << "memory copied back to host\n";
     // --- 5. Finalize Routes ---
     std::vector<std::vector<node_t>> final_routes;
     std::vector<bool> visited_routes(vrp.size, false);
@@ -559,6 +535,7 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
             }
         }
     }
+    std::cout << "routes generated\n";
 
     checkCudaErrors(cudaFree(d_nodes));
     checkCudaErrors(cudaFree(d_customer_route_map));
@@ -816,9 +793,9 @@ int main(int argc, char *argv[])
 
     std::chrono::duration<double> elapsed = end_time - start_time;
     weight_t total_cost = calCost(vrp, routes);
-    auto postRoutes = postProcessIt(vrp, routes, total_cost);
-    total_cost = calCost(vrp, postRoutes);
-    bool is_valid = verify_sol(vrp, postRoutes);
+    // routes = postProcessIt(vrp, routes, total_cost);
+    // total_cost = calCost(vrp, routes);
+    bool is_valid = verify_sol(vrp, routes, vrp.getCapacity());
 
     std::cout << "--- Parallel Clarke & Wright Savings Algorithm ---" << std::endl;
     std::cout << "Problem File: " << argv[1] << std::endl;
@@ -826,7 +803,7 @@ int main(int argc, char *argv[])
     std::cout << "--------------------------------------------------" << std::endl;
     std::cout << std::fixed << std::setprecision(2);
     std::cout << "Total Solution Cost: " << total_cost << std::endl;
-    std::cout << "Number of Routes:   " << postRoutes.size() << std::endl;
+    std::cout << "Number of Routes:   " << routes.size() << std::endl;
     std::cout << "Total Time Taken:    " << elapsed.count() << " seconds" << std::endl;
     std::cout << "Solution Validity:   " << (is_valid ? "VALID" : "INVALID") << std::endl;
     std::cout << "--------------------------------------------------" << std::endl;
