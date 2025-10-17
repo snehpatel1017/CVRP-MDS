@@ -40,7 +40,6 @@ struct Saving
 {
     volatile int i, j;
     volatile double value;
-    volatile int route_id_i, route_id_j;
 };
 
 class VRP
@@ -214,7 +213,7 @@ __global__ void find_best_saving_kernel(
     node_t route_id_i = customer_route_map[i];
     node_t route_id_j = customer_route_map[j];
 
-    if (route_id_i == route_id_j || route_id_i < 0 || route_id_j < 0)
+    if ((route_id_i == route_id_j) || (route_id_i < 0) || (route_id_j < 0))
         return;
     if (route_demands[route_id_i] + route_demands[route_id_j] > capacity)
         return;
@@ -223,12 +222,10 @@ __global__ void find_best_saving_kernel(
     node_t back_i = route_tail[route_id_i];
     node_t front_j = route_head[route_id_j];
     node_t back_j = route_tail[route_id_j];
-
-    if (!((i == front_i || i == back_i) && (j == front_j || j == back_j)))
-    {
+    if (front_i == DEPOT || back_i == DEPOT || front_j == DEPOT || back_j == DEPOT)
         return;
-    }
-    if (!(i == back_i && j == front_j) && !(j == back_j && i == front_i))
+
+    if (!((i == back_i && j == front_j) || (j == back_j && i == front_i)))
     {
         return;
     }
@@ -257,8 +254,6 @@ __global__ void find_best_saving_kernel(
             // Now this thread has the exclusive right to update the i and j indices.
             best_saving_out->i = i;
             best_saving_out->j = j;
-            best_saving_out->route_id_i = route_id_i;
-            best_saving_out->route_id_j = route_id_j;
             break; // Success, exit the loop.
         }
 
@@ -286,49 +281,36 @@ __global__ void update_gpu_mempory(
     node_t head_j,
     node_t tail_j)
 {
-    cg::grid_group grid = cg::this_grid();
+    // cg::grid_group grid = cg::this_grid();
 
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    int total_threads = blockDim.x * gridDim.x;
-    if (tid == 0)
+    if (type == 1)
     {
-
-        if (type == 1)
-        {
-            next_customer[i] = j;
-            prev_customer[j] = i;
-            route_tail[route_id_i] = tail_j;
-        }
-        else if (type == 2)
-        {
-            next_customer[j] = i;
-            prev_customer[i] = j;
-            route_head[route_id_i] = head_j;
-        }
-
+        next_customer[i] = j;
+        prev_customer[j] = i;
+        route_tail[route_id_i] = tail_j; // New tail is old tail of j
+        customer_route_map[tail_j] = route_id_i;
+        customer_route_map[head_j] = route_id_i;
         route_demands[route_id_i] += route_demands[route_id_j];
         route_demands[route_id_j] = 0;
+        route_head[route_id_j] = DEPOT;
+        route_tail[route_id_j] = DEPOT;
+    }
+    else if (type == 2)
+    {
+        next_customer[j] = i;
+        prev_customer[i] = j;
+        route_tail[route_id_j] = tail_i;
+        customer_route_map[tail_i] = route_id_j;
+        customer_route_map[head_i] = route_id_j;
+        route_demands[route_id_j] += route_demands[route_id_i];
+        route_demands[route_id_i] = 0;
+        route_head[route_id_i] = DEPOT;
+        route_tail[route_id_i] = DEPOT;
     }
 
-    grid.sync();
-    for (node_t curr = tid; curr <= num_customers; curr += total_threads)
-    {
-        if (curr == 0)
-            continue;
-        if (customer_route_map[curr] == route_id_j)
-        {
-            customer_route_map[curr] = route_id_i;
-        }
-    }
-    if (tid == 0)
-    {
-        route_head[route_id_j] = DEPOT;
-        best_saving_out->value = 0;
-        best_saving_out->i = -1;
-        best_saving_out->j = -1;
-        best_saving_out->route_id_i = -1;
-        best_saving_out->route_id_j = -1;
-    }
+    best_saving_out->value = 0;
+    best_saving_out->i = -1;
+    best_saving_out->j = -1;
 }
 
 std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
@@ -387,7 +369,7 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
     checkCudaErrors(cudaMemcpy(d_prev_customer, h_prev_customer.data(), vrp.size * sizeof(node_t), cudaMemcpyHostToDevice));
     checkCudaErrors(cudaMemcpy(d_dist_to_depot, vrp.dist_to_depot.data(), (NUM_CUSTOMERS + 1) * sizeof(weight_t), cudaMemcpyHostToDevice));
     // Initialize the output struct on the GPU to a known "worst" state
-    Saving h_best_saving_init = {-1, -1, -DBL_MAX, -1, -1};
+    Saving h_best_saving_init = {-1, -1, -DBL_MAX};
     checkCudaErrors(cudaMemcpy(d_best_saving_out, &h_best_saving_init, sizeof(Saving), cudaMemcpyHostToDevice));
 
     // --- 4. KERNEL LAUNCH ---
@@ -397,7 +379,7 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
         (NUM_CUSTOMERS + 1 + threadsPerBlock.y - 1) / threadsPerBlock.y);
 
     int threads_per_block = std::min(1024, NUM_CUSTOMERS);
-    int numBlocks1D = std::min(30, (NUM_CUSTOMERS + threads_per_block - 1) / threads_per_block);
+    int numBlocks1D = std::min(40, (NUM_CUSTOMERS + threads_per_block - 1) / threads_per_block);
 
     Saving h_result;
 
@@ -408,16 +390,18 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
         // std::cout << id++ << "\n";
 
         id++;
-        auto st = std::chrono::high_resolution_clock::now();
+        // auto st = std::chrono::high_resolution_clock::now();
+
         find_best_saving_kernel<<<numBlocks, threadsPerBlock>>>(
             d_nodes, d_customer_route_map, d_route_demands, d_route_head, d_route_tail, d_dist_to_depot,
             d_best_saving_out, NUM_CUSTOMERS, CAPACITY);
         checkCudaErrors(cudaDeviceSynchronize());
-        auto en = std::chrono::high_resolution_clock::now();
-        std::chrono::duration<double> diff = en - st;
-        std::cout << "Kernel-1 Time: " << diff.count() << " s\n";
+        // auto en = std::chrono::high_resolution_clock::now();
+        // std::chrono::duration<double> diff = en - st;
+        // std::cout << "Kernel-1 Time: " << diff.count() << " s\n";
 
         checkCudaErrors(cudaMemcpy(&h_result, d_best_saving_out, sizeof(Saving), cudaMemcpyDeviceToHost));
+        // std::cout << h_result.value << "\n";
         if (h_result.value <= 1e-6)
         {
             std::cout << "No more positive savings found. Halting." << std::endl;
@@ -427,10 +411,10 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
 
         node_t i = h_result.i;
         node_t j = h_result.j;
-        // std::cout << i << " " << j << "\n";
 
-        node_t route_id_i = h_result.route_id_i;
-        node_t route_id_j = h_result.route_id_j;
+        node_t route_id_i = h_customer_route_map[i];
+        node_t route_id_j = h_customer_route_map[j];
+        // std::cout << i << " " << j << " " << route_id_i << " " << route_id_j << " : cpu\n";
 
         // Check if the merge is valid (different routes and combined demand is within capacity)
         if (route_id_i != route_id_j && h_route_demands[route_id_i] + h_route_demands[route_id_j] <= vrp.capacity)
@@ -445,18 +429,30 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
 
             if (tail_i == i && head_j == j)
             {
-                // h_next_customer[i] = j;
-                // h_prev_customer[j] = i;
+                h_next_customer[i] = j;
+                h_prev_customer[j] = i;
                 h_route_tail[route_id_i] = tail_j; // New tail is old tail of j
+                h_customer_route_map[tail_j] = route_id_i;
+                h_customer_route_map[head_j] = route_id_i;
+                h_route_demands[route_id_i] += h_route_demands[route_id_j];
+                h_route_demands[route_id_j] = 0;
+                h_route_head[route_id_j] = DEPOT;
+                h_route_tail[route_id_j] = DEPOT;
                 merged = true;
                 type = 1;
             }
             // Case 2: Tail of route j connects to Head of route i [...j] -> [i...]
             else if (tail_j == j && head_i == i)
             {
-                // h_next_customer[j] = i;
-                // h_prev_customer[i] = j;
-                h_route_head[route_id_i] = head_j; // New head is old head of j
+                h_next_customer[j] = i;
+                h_prev_customer[i] = j;
+                h_route_tail[route_id_j] = tail_i;
+                h_customer_route_map[tail_i] = route_id_j;
+                h_customer_route_map[head_i] = route_id_j;
+                h_route_demands[route_id_j] += h_route_demands[route_id_i];
+                h_route_demands[route_id_i] = 0;
+                h_route_head[route_id_i] = DEPOT;
+                h_route_tail[route_id_i] = DEPOT;
                 merged = true;
                 type = 2;
             }
@@ -464,53 +460,37 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
             if (merged)
             {
 
-                h_route_demands[route_id_i] += h_route_demands[route_id_j];
-                h_route_demands[route_id_j] = 0;
-                // h_customer_route_map[j] = route_id_i;
-                h_route_head[route_id_j] = DEPOT;
-                h_route_tail[route_id_j] = DEPOT;
-                st = std::chrono::high_resolution_clock::now();
-                void *args[] = {
-                    (void *)&type,
-                    &d_customer_route_map,
-                    &d_route_demands,
-                    &d_route_head,
-                    &d_route_tail,
-                    &d_next_customer,
-                    &d_prev_customer,
-                    &d_temporary,
-                    &d_best_saving_out,
-                    (void *)&NUM_CUSTOMERS,
-                    (void *)&i,
-                    (void *)&j,
-                    (void *)&route_id_i,
-                    (void *)&route_id_j,
-                    (void *)&head_i,
-                    (void *)&tail_i,
-                    (void *)&head_j,
-                    (void *)&tail_j};
-
-                checkCudaErrors(cudaLaunchCooperativeKernel(
-                    (void *)update_gpu_mempory,
-                    numBlocks1D,
-                    threads_per_block,
-                    args));
+                update_gpu_mempory<<<1, 1>>>(
+                    type,
+                    d_customer_route_map,
+                    d_route_demands,
+                    d_route_head,
+                    d_route_tail,
+                    d_next_customer,
+                    d_prev_customer,
+                    d_temporary,
+                    d_best_saving_out,
+                    NUM_CUSTOMERS,
+                    i,
+                    j,
+                    route_id_i,
+                    route_id_j,
+                    head_i,
+                    tail_i,
+                    head_j,
+                    tail_j);
                 checkCudaErrors(cudaDeviceSynchronize());
-                en = std::chrono::high_resolution_clock::now();
-                std::chrono::duration<double> diff = en - st;
-                std::cout << "Kernel-2 Time: " << diff.count() << " s\n";
-                break;
             }
         }
     }
     std::cout << "loop ended\n";
 
-    checkCudaErrors(cudaMemcpy(h_customer_route_map.data(), d_customer_route_map, (NUM_CUSTOMERS + 1) * sizeof(node_t), cudaMemcpyDeviceToHost));
-    checkCudaErrors(cudaMemcpy(h_route_demands.data(), d_route_demands, (NUM_CUSTOMERS + 1) * sizeof(demand_t), cudaMemcpyDeviceToHost));
-    checkCudaErrors(cudaMemcpy(h_route_head.data(), d_route_head, (NUM_CUSTOMERS + 1) * sizeof(node_t), cudaMemcpyDeviceToHost));
-    checkCudaErrors(cudaMemcpy(h_route_tail.data(), d_route_tail, (NUM_CUSTOMERS + 1) * sizeof(node_t), cudaMemcpyDeviceToHost));
-    checkCudaErrors(cudaMemcpy(h_next_customer.data(), d_next_customer, vrp.size * sizeof(node_t), cudaMemcpyDeviceToHost));
-    checkCudaErrors(cudaMemcpy(h_prev_customer.data(), d_prev_customer, vrp.size * sizeof(node_t), cudaMemcpyDeviceToHost));
+    // checkCudaErrors(cudaMemcpy(h_customer_route_map.data(), d_customer_route_map, (NUM_CUSTOMERS + 1) * sizeof(node_t), cudaMemcpyDeviceToHost));
+    // checkCudaErrors(cudaMemcpy(h_route_demands.data(), d_route_demands, (NUM_CUSTOMERS + 1) * sizeof(demand_t), cudaMemcpyDeviceToHost));
+    // checkCudaErrors(cudaMemcpy(h_route_head.data(), d_route_head, (NUM_CUSTOMERS + 1) * sizeof(node_t), cudaMemcpyDeviceToHost));
+    // checkCudaErrors(cudaMemcpy(h_route_tail.data(), d_route_tail, (NUM_CUSTOMERS + 1) * sizeof(node_t), cudaMemcpyDeviceToHost));
+    // checkCudaErrors(cudaMemcpy(h_next_customer.data(), d_next_customer, vrp.size * sizeof(node_t), cudaMemcpyDeviceToHost));
+    // checkCudaErrors(cudaMemcpy(h_prev_customer.data(), d_prev_customer, vrp.size * sizeof(node_t), cudaMemcpyDeviceToHost));
     std::cout << "memory copied back to host\n";
     // --- 5. Finalize Routes ---
     std::vector<std::vector<node_t>> final_routes;
@@ -519,7 +499,7 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
     for (node_t i = 1; i < vrp.size; ++i)
     {
         node_t route_id = h_customer_route_map[i];
-        if (route_id != DEPOT && !visited_routes[route_id])
+        if (route_id == i && !visited_routes[route_id])
         {
             visited_routes[route_id] = true;
             std::vector<node_t> current_route;
@@ -550,230 +530,6 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
     checkCudaErrors(cudaDeviceReset());
 
     return final_routes;
-}
-
-void tsp_approx(const VRP &vrp, std::vector<node_t> &cities, std::vector<node_t> &tour, node_t ncities)
-{
-    node_t i, j;
-    node_t ClosePt = 0;
-    weight_t CloseDist;
-
-    for (i = 1; i < ncities; i++)
-        tour[i] = cities[i - 1];
-
-    tour[0] = cities[ncities - 1];
-
-    for (i = 1; i < ncities; i++)
-    {
-        weight_t ThisX = vrp.node[tour[i - 1]].x;
-        weight_t ThisY = vrp.node[tour[i - 1]].y;
-        CloseDist = DBL_MAX;
-        for (j = ncities - 1;; j--)
-        {
-            weight_t ThisDist = (vrp.node[tour[j]].x - ThisX) * (vrp.node[tour[j]].x - ThisX);
-            if (ThisDist <= CloseDist)
-            {
-                ThisDist += (vrp.node[tour[j]].y - ThisY) * (vrp.node[tour[j]].y - ThisY);
-                if (ThisDist <= CloseDist)
-                {
-                    if (j < i)
-                        break;
-                    CloseDist = ThisDist;
-                    ClosePt = j;
-                }
-            }
-        }
-        unsigned temp = tour[i];
-        tour[i] = tour[ClosePt];
-        tour[ClosePt] = temp;
-    }
-}
-
-std::vector<std::vector<node_t>>
-postprocess_tsp_approx(const VRP &vrp, std::vector<std::vector<node_t>> &solRoutes)
-{
-    std::vector<std::vector<node_t>> modifiedRoutes;
-
-    unsigned nroutes = solRoutes.size();
-    for (unsigned i = 0; i < nroutes; ++i)
-    {
-        unsigned sz = solRoutes[i].size();
-        std::vector<node_t> cities(sz + 1);
-        std::vector<node_t> tour(sz + 1);
-
-        for (unsigned j = 0; j < sz; ++j)
-            cities[j] = solRoutes[i][j];
-
-        cities[sz] = 0;
-
-        tsp_approx(vrp, cities, tour, sz + 1);
-
-        vector<node_t> curr_route;
-        for (unsigned kk = 1; kk < sz + 1; ++kk)
-        {
-            curr_route.push_back(tour[kk]);
-        }
-
-        modifiedRoutes.push_back(curr_route);
-    }
-    return modifiedRoutes;
-}
-
-void tsp_2opt(const VRP &vrp, std::vector<node_t> &cities, std::vector<node_t> &tour, unsigned ncities)
-{
-    unsigned improve = 0;
-
-    while (improve < 2)
-    {
-        double best_distance = 0.0;
-
-        best_distance += vrp.get_dist(DEPOT, cities[0]);
-
-        for (unsigned jj = 1; jj < ncities; ++jj)
-        {
-            best_distance += vrp.get_dist(cities[jj - 1], cities[jj]);
-        }
-
-        best_distance += vrp.get_dist(DEPOT, cities[ncities - 1]);
-
-        for (unsigned i = 0; i < ncities - 1; i++)
-        {
-            for (unsigned k = i + 1; k < ncities; k++)
-            {
-                double new_distance = best_distance;
-                if (i == 0)
-                    new_distance -= vrp.get_dist(DEPOT, cities[i]);
-                else
-                    new_distance -= vrp.get_dist(cities[i - 1], cities[i]);
-
-                if (k == ncities - 1)
-                    new_distance -= vrp.get_dist(cities[k], DEPOT);
-                else
-                    new_distance -= vrp.get_dist(cities[k], cities[k + 1]);
-
-                if (i == 0)
-                    new_distance += vrp.get_dist(DEPOT, cities[k]);
-                else
-                    new_distance += vrp.get_dist(cities[i - 1], cities[k]);
-
-                if (k == ncities - 1)
-                    new_distance += vrp.get_dist(cities[i], DEPOT);
-                else
-                    new_distance += vrp.get_dist(cities[i], cities[k + 1]);
-
-                if (new_distance < best_distance)
-                {
-                    improve = 0;
-                    int left_ptr = i, right_ptr = k;
-                    while (left_ptr <= right_ptr)
-                    {
-                        swap(cities[left_ptr++], cities[right_ptr--]);
-                    }
-                    best_distance = new_distance;
-                }
-            }
-        }
-        improve++;
-    }
-}
-std::vector<std::vector<node_t>>
-postprocess_2OPT(const VRP &vrp, std::vector<std::vector<node_t>> &final_routes)
-{
-    std::vector<std::vector<node_t>> postprocessed_final_routes;
-
-    unsigned nroutes = final_routes.size();
-    for (unsigned i = 0; i < nroutes; ++i)
-    {
-        unsigned sz = final_routes[i].size();
-        std::vector<node_t> cities(sz);
-        std::vector<node_t> tour(sz);
-
-        for (unsigned j = 0; j < sz; ++j)
-            cities[j] = final_routes[i][j];
-
-        vector<node_t> curr_route;
-
-        if (sz > 2)
-            tsp_2opt(vrp, cities, tour, sz);
-
-        for (unsigned kk = 0; kk < sz; ++kk)
-        {
-            curr_route.push_back(cities[kk]);
-        }
-
-        postprocessed_final_routes.push_back(curr_route);
-    }
-    return postprocessed_final_routes;
-}
-
-weight_t get_total_cost_of_routes(const VRP &vrp, vector<vector<node_t>> &final_routes)
-{
-    weight_t total_cost = 0.0;
-    for (unsigned ii = 0; ii < final_routes.size(); ++ii)
-    {
-        weight_t curr_route_cost = 0;
-        curr_route_cost += vrp.get_dist(DEPOT, final_routes[ii][0]);
-        for (unsigned jj = 1; jj < final_routes[ii].size(); ++jj)
-        {
-            curr_route_cost += vrp.get_dist(final_routes[ii][jj - 1], final_routes[ii][jj]);
-        }
-        curr_route_cost += vrp.get_dist(DEPOT, final_routes[ii][final_routes[ii].size() - 1]);
-
-        total_cost += curr_route_cost;
-    }
-
-    return total_cost;
-}
-
-std::vector<std::vector<node_t>>
-postProcessIt(const VRP &vrp, std::vector<std::vector<node_t>> &final_routes, weight_t &minCost)
-{
-    std::vector<std::vector<node_t>> postprocessed_final_routes;
-
-    auto postprocessed_final_routes1 = postprocess_tsp_approx(vrp, final_routes);
-    auto postprocessed_final_routes2 = postprocess_2OPT(vrp, postprocessed_final_routes1);
-    auto postprocessed_final_routes3 = postprocess_2OPT(vrp, final_routes);
-
-#pragma omp parallel for
-    for (unsigned zzz = 0; zzz < final_routes.size(); ++zzz)
-    {
-        vector<node_t> postprocessed_route2 = postprocessed_final_routes2[zzz];
-        vector<node_t> postprocessed_route3 = postprocessed_final_routes3[zzz];
-
-        unsigned sz2 = postprocessed_route2.size();
-        unsigned sz3 = postprocessed_route3.size();
-
-        weight_t postprocessed_route2_cost = 0.0;
-        postprocessed_route2_cost += vrp.get_dist(DEPOT, postprocessed_route2[0]);
-        for (unsigned jj = 1; jj < sz2; ++jj)
-        {
-            postprocessed_route2_cost += vrp.get_dist(postprocessed_route2[jj - 1], postprocessed_route2[jj]);
-        }
-        postprocessed_route2_cost += vrp.get_dist(DEPOT, postprocessed_route2[sz2 - 1]);
-
-        weight_t postprocessed_route3_cost = 0.0;
-        postprocessed_route3_cost += vrp.get_dist(DEPOT, postprocessed_route3[0]);
-        for (unsigned jj = 1; jj < sz3; ++jj)
-        {
-            postprocessed_route3_cost += vrp.get_dist(postprocessed_route3[jj - 1], postprocessed_route3[jj]);
-        }
-        postprocessed_route3_cost += vrp.get_dist(DEPOT, postprocessed_route3[sz3 - 1]);
-
-        if (postprocessed_route3_cost > postprocessed_route2_cost)
-        {
-            postprocessed_final_routes.push_back(postprocessed_route2);
-        }
-        else
-        {
-            postprocessed_final_routes.push_back(postprocessed_route3);
-        }
-    }
-
-    auto postprocessed_final_routes_cost = get_total_cost_of_routes(vrp, postprocessed_final_routes);
-
-    minCost = postprocessed_final_routes_cost;
-
-    return postprocessed_final_routes;
 }
 
 int main(int argc, char *argv[])

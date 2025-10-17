@@ -363,56 +363,17 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
                 if (merged)
                 {
                     route_demands[route_id_i] += route_demands[route_id_j];
+                    customer_route_map[head_j] = route_id_i;
+                    customer_route_map[tail_j] = route_id_i;
+                    route_demands[route_id_j] = 0;
 
-                    if (reverse == 0)
-                    {
-                        customer_route_map[j] = route_id_i;
-                        for (node_t curr = 1; curr < vrp.getSize(); curr++)
-                        {
-                            if (customer_route_map[curr] == route_id_j)
-                            {
-                                temporary[curr] = prev_customer[curr];
-                            }
-                        }
-                        for (node_t curr = 1; curr < vrp.getSize(); curr++)
-                        {
-                            if (customer_route_map[curr] == route_id_j)
-                            {
-                                prev_customer[curr] = next_customer[curr];
-                                next_customer[curr] = temporary[curr];
-                            }
-                        }
-                    }
-                    else if (reverse == 1)
-                    {
-                        for (node_t curr = 1; curr < vrp.getSize(); curr++)
-                        {
-                            if (curr == i)
-                                continue;
-                            if (customer_route_map[curr] == route_id_i)
-                            {
-                                temporary[curr] = prev_customer[curr];
-                            }
-                        }
-                        for (node_t curr = 1; curr < vrp.getSize(); curr++)
-                        {
-                            if (curr == i)
-                                continue;
-                            if (customer_route_map[curr] == route_id_i)
-                            {
-                                prev_customer[curr] = next_customer[curr];
-                                next_customer[curr] = temporary[curr];
-                            }
-                        }
-                    }
-
-                    for (node_t curr = 1; curr < vrp.getSize(); curr++)
-                    {
-                        if (customer_route_map[curr] == route_id_j)
-                        {
-                            customer_route_map[curr] = route_id_i;
-                        }
-                    }
+                    // for (node_t curr = 1; curr < vrp.getSize(); curr++)
+                    // {
+                    //     if (customer_route_map[curr] == route_id_j)
+                    //     {
+                    //         customer_route_map[curr] = route_id_i;
+                    //     }
+                    // }
 
                     route_head[route_id_j] = DEPOT;
                     route_tail[route_id_j] = DEPOT;
