@@ -385,6 +385,7 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
 
     // --- 4. Merge Routes Greedily (Sequential) ---
     int id = 0;
+    int pre_i = -1, pre_j = -1;
     while (true)
     {
         // std::cout << id++ << "\n";
@@ -414,6 +415,13 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
 
         node_t route_id_i = h_customer_route_map[i];
         node_t route_id_j = h_customer_route_map[j];
+        if (i == pre_i && j == pre_j)
+        {
+            std::cout << "Stuck in a loop. Halting." << std::endl;
+            break;
+        }
+        pre_i = i;
+        pre_j = j;
         // std::cout << i << " " << j << " " << route_id_i << " " << route_id_j << " : cpu\n";
 
         // Check if the merge is valid (different routes and combined demand is within capacity)
