@@ -189,6 +189,18 @@ __device__ double device_euclidean_dist(const Point &a, const Point &b)
     return sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y));
 }
 
+__device__ int get_pair_mathematical(long long global_index, int n)
+{
+    double n_double = (double)(n);
+    int current_i = (int)(n_double - 2.0 -
+                          floor(sqrt(-8.0 * global_index + 4.0 * n_double * (n_double - 1.0) - 7.0) / 2.0 - 0.5));
+
+    return current_i;
+}
+
+__device__ volatile unsigned long long int global_counter_1 = 0;
+__device__ volatile unsigned long long int global_counter_2 = 0;
+
 __global__ void find_best_saving_kernel(
     const Point *nodes,
     const node_t *customer_route_map,
@@ -201,64 +213,116 @@ __global__ void find_best_saving_kernel(
     demand_t capacity)
 {
 
-    int i = blockIdx.x * blockDim.x + threadIdx.x + 1;
-    int j = blockIdx.y * blockDim.y + threadIdx.y + 1;
+    long long tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_threads = gridDim.x * blockDim.x;
+    unsigned long long n = (unsigned long long)num_customers + 1;
+    unsigned long long total_pairs = (unsigned long long)num_customers * (num_customers + 1) / 2;
 
-    if (i >= (num_customers + 1) || j >= (num_customers + 1) || i >= j)
+    double local_best_saving_value = 0.0;
+    int local_best_i = -1;
+    int local_best_j = -1;
+
+    for (long long curr = tid; curr < total_pairs; curr += total_threads)
     {
-        return;
-    }
+        int i = get_pair_mathematical(curr, num_customers + 1);
 
-    // --- 2. Check validity of merging pair (i, j) ---
-    node_t route_id_i = customer_route_map[i];
-    node_t route_id_j = customer_route_map[j];
+        long long first_pair_index_for_i = (long long)i * n -
+                                           (long long)i * (i + 1) / 2;
+        int j = curr - first_pair_index_for_i + i + 1;
+        // --- 2. Check validity of merging pair (i, j) ---
+        node_t route_id_i = customer_route_map[i];
+        node_t route_id_j = customer_route_map[j];
 
-    if ((route_id_i == route_id_j) || (route_id_i < 0) || (route_id_j < 0))
-        return;
-    if (route_demands[route_id_i] + route_demands[route_id_j] > capacity)
-        return;
+        if ((route_id_i == route_id_j) || (route_id_i < 0) || (route_id_j < 0))
+            continue;
+        if (route_demands[route_id_i] + route_demands[route_id_j] > capacity)
+            continue;
 
-    node_t front_i = route_head[route_id_i];
-    node_t back_i = route_tail[route_id_i];
-    node_t front_j = route_head[route_id_j];
-    node_t back_j = route_tail[route_id_j];
-    if (front_i == DEPOT || back_i == DEPOT || front_j == DEPOT || back_j == DEPOT)
-        return;
+        node_t front_i = route_head[route_id_i];
+        node_t back_i = route_tail[route_id_i];
+        node_t front_j = route_head[route_id_j];
+        node_t back_j = route_tail[route_id_j];
+        if (front_i == DEPOT || back_i == DEPOT || front_j == DEPOT || back_j == DEPOT)
+            continue;
 
-    if (!((i == back_i && j == front_j) || (j == back_j && i == front_i)))
-    {
-        return;
-    }
-
-    // --- 3. Calculate saving if the merge is valid ---
-    weight_t saving_value = dist_to_depot[i]                             // dist(i, depot)
-                            + dist_to_depot[j]                           // dist(j, depot)
-                            - device_euclidean_dist(nodes[i], nodes[j]); // dist(i, j)
-
-    unsigned long long int *address_as_ull = (unsigned long long int *)&(best_saving_out->value);
-
-    // Read the current maximum value from global memory.
-    double current_max_val = __longlong_as_double(*address_as_ull);
-
-    // This loop continues as long as this thread's saving is better than the global max.
-    while (saving_value > current_max_val)
-    {
-        // Convert our local values to their bit representations for the atomic operation.
-        unsigned long long int assumed_ull = __double_as_longlong(current_max_val);
-        unsigned long long int new_val_ull = __double_as_longlong(saving_value);
-
-        unsigned long long int prev_val_ull = atomicCAS(address_as_ull, assumed_ull, new_val_ull);
-
-        if (prev_val_ull == assumed_ull)
+        if (!((i == back_i && j == front_j) || (j == back_j && i == front_i)))
         {
-            // Now this thread has the exclusive right to update the i and j indices.
-            best_saving_out->i = i;
-            best_saving_out->j = j;
-            break; // Success, exit the loop.
+            continue;
         }
 
-        current_max_val = __longlong_as_double(prev_val_ull);
+        // --- 3. Calculate saving if the merge is valid ---
+        double saving_value = dist_to_depot[i]                             // dist(i, depot)
+                              + dist_to_depot[j]                           // dist(j, depot)
+                              - device_euclidean_dist(nodes[i], nodes[j]); // dist(i, j)
+        if (saving_value <= 0)
+        {
+            continue;
+        }
+        if (local_best_saving_value < saving_value)
+        {
+            local_best_saving_value = saving_value;
+            local_best_i = i;
+            local_best_j = j;
+        }
     }
+
+    unsigned long long int *global_max_addr_ull = (unsigned long long int *)&(best_saving_out->value);
+
+    unsigned long long int new_val_ull = __double_as_longlong(local_best_saving_value);
+
+    atomicMax(global_max_addr_ull, new_val_ull);
+
+    __syncthreads();
+    if (threadIdx.x == 0)
+    {
+        atomicAdd((unsigned long long int *)&global_counter_1, 1);
+    }
+    while (global_counter_1 < 40)
+    {
+    }
+
+    if (local_best_saving_value == best_saving_out->value)
+    {
+        atomicMin((unsigned int *)&(best_saving_out->i), (unsigned int)local_best_i);
+    }
+    __syncthreads();
+    if (threadIdx.x == 0)
+    {
+        atomicAdd((unsigned long long int *)&global_counter_2, 1);
+    }
+    while (global_counter_2 < 40)
+    {
+    }
+
+    if ((best_saving_out->i == (unsigned int)local_best_i) && (local_best_saving_value == best_saving_out->value))
+    {
+        best_saving_out->j = (unsigned int)local_best_j;
+    }
+
+    // unsigned long long int *address_as_ull = (unsigned long long int *)&(best_saving_out->value);
+
+    // // Read the current maximum value from global memory.
+    // double current_max_val = __longlong_as_double(*address_as_ull);
+
+    // // This loop continues as long as this thread's saving is better than the global max.
+    // while (local_best_saving_value > current_max_val)
+    // {
+    //     // Convert our local values to their bit representations for the atomic operation.
+    //     unsigned long long int assumed_ull = __double_as_longlong(current_max_val);
+    //     unsigned long long int new_val_ull = __double_as_longlong(local_best_saving_value);
+
+    //     unsigned long long int prev_val_ull = atomicCAS(address_as_ull, assumed_ull, new_val_ull);
+
+    //     if (prev_val_ull == assumed_ull)
+    //     {
+    //         // Now this thread has the exclusive right to update the i and j indices.
+    //         best_saving_out->i = local_best_i;
+    //         best_saving_out->j = local_best_j;
+    //         break; // Success, exit the loop.
+    //     }
+
+    //     current_max_val = __longlong_as_double(prev_val_ull);
+    // }
 }
 
 __global__ void update_gpu_mempory(
@@ -311,6 +375,8 @@ __global__ void update_gpu_mempory(
     best_saving_out->value = 0;
     best_saving_out->i = -1;
     best_saving_out->j = -1;
+    global_counter_1 = 0;
+    global_counter_2 = 0;
 }
 
 std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
@@ -369,14 +435,12 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
     checkCudaErrors(cudaMemcpy(d_prev_customer, h_prev_customer.data(), vrp.size * sizeof(node_t), cudaMemcpyHostToDevice));
     checkCudaErrors(cudaMemcpy(d_dist_to_depot, vrp.dist_to_depot.data(), (NUM_CUSTOMERS + 1) * sizeof(weight_t), cudaMemcpyHostToDevice));
     // Initialize the output struct on the GPU to a known "worst" state
-    Saving h_best_saving_init = {-1, -1, -DBL_MAX};
+    Saving h_best_saving_init = {-1, -1, 0};
     checkCudaErrors(cudaMemcpy(d_best_saving_out, &h_best_saving_init, sizeof(Saving), cudaMemcpyHostToDevice));
 
     // --- 4. KERNEL LAUNCH ---
-    dim3 threadsPerBlock(32, 32);
-    dim3 numBlocks(
-        (NUM_CUSTOMERS + 1 + threadsPerBlock.x - 1) / threadsPerBlock.x,
-        (NUM_CUSTOMERS + 1 + threadsPerBlock.y - 1) / threadsPerBlock.y);
+    dim3 threadsPerBlock(1024);
+    dim3 numBlocks(40);
 
     int threads_per_block = std::min(1024, NUM_CUSTOMERS);
     int numBlocks1D = std::min(40, (NUM_CUSTOMERS + threads_per_block - 1) / threads_per_block);
@@ -397,6 +461,7 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
             d_nodes, d_customer_route_map, d_route_demands, d_route_head, d_route_tail, d_dist_to_depot,
             d_best_saving_out, NUM_CUSTOMERS, CAPACITY);
         checkCudaErrors(cudaDeviceSynchronize());
+
         // auto en = std::chrono::high_resolution_clock::now();
         // std::chrono::duration<double> diff = en - st;
         // std::cout << "Kernel-1 Time: " << diff.count() << " s\n";
@@ -540,6 +605,266 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
     return final_routes;
 }
 
+void tsp_approx(const VRP &vrp, std::vector<node_t> &cities, std::vector<node_t> &tour, node_t ncities)
+{
+    node_t i, j;
+    node_t ClosePt = 0;
+    weight_t CloseDist;
+    //~ node_t endtour=0;
+
+    for (i = 1; i < ncities; i++)
+        tour[i] = cities[i - 1];
+
+    tour[0] = cities[ncities - 1];
+
+    for (i = 1; i < ncities; i++)
+    {
+        weight_t ThisX = vrp.node[tour[i - 1]].x;
+        weight_t ThisY = vrp.node[tour[i - 1]].y;
+        CloseDist = DBL_MAX;
+        for (j = ncities - 1;; j--)
+        {
+            weight_t ThisDist = (vrp.node[tour[j]].x - ThisX) * (vrp.node[tour[j]].x - ThisX);
+            if (ThisDist <= CloseDist)
+            {
+                ThisDist += (vrp.node[tour[j]].y - ThisY) * (vrp.node[tour[j]].y - ThisY);
+                if (ThisDist <= CloseDist)
+                {
+                    if (j < i)
+                        break;
+                    CloseDist = ThisDist;
+                    ClosePt = j;
+                }
+            }
+        }
+        /*swapping tour[i] and tour[ClosePt]*/
+        unsigned temp = tour[i];
+        tour[i] = tour[ClosePt];
+        tour[ClosePt] = temp;
+    }
+}
+
+std::vector<std::vector<node_t>>
+postprocess_tsp_approx(const VRP &vrp, std::vector<std::vector<node_t>> &solRoutes)
+{
+    std::vector<std::vector<node_t>> modifiedRoutes;
+
+    unsigned nroutes = solRoutes.size();
+    for (unsigned i = 0; i < nroutes; ++i)
+    {
+        // postprocessing solRoutes[i]
+        unsigned sz = solRoutes[i].size();
+        std::vector<node_t> cities(sz + 1);
+        std::vector<node_t> tour(sz + 1);
+
+        for (unsigned j = 0; j < sz; ++j)
+            cities[j] = solRoutes[i][j];
+
+        cities[sz] = 0; // the last node is the depot.
+
+        tsp_approx(vrp, cities, tour, sz + 1);
+
+        // the first element of the tour is now the depot. So, ignore tour[0] and insert the rest into the vector.
+
+        vector<node_t> curr_route;
+        for (unsigned kk = 1; kk < sz + 1; ++kk)
+        {
+            curr_route.push_back(tour[kk]);
+        }
+
+        modifiedRoutes.push_back(curr_route);
+    }
+    return modifiedRoutes;
+}
+
+void tsp_2opt(const VRP &vrp, std::vector<node_t> &cities, std::vector<node_t> &tour, unsigned ncities)
+{
+    // 'cities' contains the original solution. It is updated during the course of the 2opt-scheme to contain the 2opt soln.
+    // 'tour' is an auxillary array.
+
+    // repeat until no improvement is made
+    unsigned improve = 0;
+
+    while (improve < 2)
+    {
+        double best_distance = 0.0;
+
+        best_distance += vrp.get_dist(DEPOT, cities[0]); // computing distance of the first point in the route with the depot.
+
+        for (unsigned jj = 1; jj < ncities; ++jj)
+        {
+            best_distance += vrp.get_dist(cities[jj - 1], cities[jj]);
+        }
+
+        best_distance += vrp.get_dist(DEPOT, cities[ncities - 1]);
+
+        for (unsigned i = 0; i < ncities - 1; i++)
+        {
+            for (unsigned k = i + 1; k < ncities; k++)
+            {
+
+                double new_distance = best_distance;
+                if (i == 0)
+                    new_distance -= vrp.get_dist(DEPOT, cities[i]);
+                else
+                    new_distance -= vrp.get_dist(cities[i - 1], cities[i]);
+
+                if (k == ncities - 1)
+                    new_distance -= vrp.get_dist(cities[k], DEPOT);
+                else
+                    new_distance -= vrp.get_dist(cities[k], cities[k + 1]);
+
+                if (i == 0)
+                    new_distance += vrp.get_dist(DEPOT, cities[k]);
+                else
+                    new_distance += vrp.get_dist(cities[i - 1], cities[k]);
+
+                if (k == ncities - 1)
+                    new_distance += vrp.get_dist(cities[i], DEPOT);
+                else
+                    new_distance += vrp.get_dist(cities[i], cities[k + 1]);
+
+                if (new_distance < best_distance)
+                {
+                    // Improvement found so reset
+                    improve = 0;
+                    int left_ptr = i, right_ptr = k;
+                    while (left_ptr <= right_ptr)
+                    {
+                        swap(cities[left_ptr++], cities[right_ptr--]);
+                    }
+                    best_distance = new_distance;
+                }
+            }
+        }
+        improve++;
+    }
+}
+std::vector<std::vector<node_t>>
+postprocess_2OPT(const VRP &vrp, std::vector<std::vector<node_t>> &final_routes)
+{
+    std::vector<std::vector<node_t>> postprocessed_final_routes;
+
+    unsigned nroutes = final_routes.size();
+    for (unsigned i = 0; i < nroutes; ++i)
+    {
+        // postprocessing final_routes[i]
+        unsigned sz = final_routes[i].size();
+        //~ unsigned* cities = (unsigned*) malloc(sizeof(unsigned) * (sz));
+        //~ unsigned* tour = (unsigned*) malloc(sizeof(unsigned) * (sz));  // this is an auxillary array
+
+        std::vector<node_t> cities(sz);
+        std::vector<node_t> tour(sz);
+
+        for (unsigned j = 0; j < sz; ++j)
+            cities[j] = final_routes[i][j];
+
+        vector<node_t> curr_route;
+
+        if (sz > 2)                          // for sz <= 1, the cost of the path cannot change. So no point running this.
+            tsp_2opt(vrp, cities, tour, sz); // MAIN
+
+        for (unsigned kk = 0; kk < sz; ++kk)
+        {
+            curr_route.push_back(cities[kk]);
+        }
+
+        postprocessed_final_routes.push_back(curr_route);
+    }
+    return postprocessed_final_routes;
+}
+
+weight_t get_total_cost_of_routes(const VRP &vrp, vector<vector<node_t>> &final_routes)
+{
+    weight_t total_cost = 0.0;
+    for (unsigned ii = 0; ii < final_routes.size(); ++ii)
+    {
+        weight_t curr_route_cost = 0;
+        //~ curr_route_cost += L2_dist(points.x_coords[final_routes[ii][0]], points.y_coords[final_routes[ii][0]], 0, 0); // computing distance of the first point in the route with the depot.
+        curr_route_cost += vrp.get_dist(DEPOT, final_routes[ii][0]);
+        for (unsigned jj = 1; jj < final_routes[ii].size(); ++jj)
+        {
+            //~ curr_route_cost += L2_dist(points.x_coords[final_routes[ii][jj-1]], points.y_coords[final_routes[ii][jj-1]], points.x_coords[final_routes[ii][jj]], points.y_coords[final_routes[ii][jj]]);
+            curr_route_cost += vrp.get_dist(final_routes[ii][jj - 1], final_routes[ii][jj]);
+        }
+        //~ curr_route_cost += L2_dist(points.x_coords[final_routes[ii][final_routes[ii].size()-1]], points.y_coords[final_routes[ii][final_routes[ii].size()-1]], 0, 0); // computing distance of the last point in the route with the depot.
+        curr_route_cost += vrp.get_dist(DEPOT, final_routes[ii][final_routes[ii].size() - 1]);
+
+        total_cost += curr_route_cost;
+    }
+
+    return total_cost;
+}
+
+//
+// MAIN POST PROCESS ROUTINE
+//
+std::vector<std::vector<node_t>>
+postProcessIt(const VRP &vrp, std::vector<std::vector<node_t>> &final_routes, weight_t &minCost)
+{
+    std::vector<std::vector<node_t>> postprocessed_final_routes;
+
+    auto postprocessed_final_routes1 = postprocess_tsp_approx(vrp, final_routes);
+    auto postprocessed_final_routes2 = postprocess_2OPT(vrp, postprocessed_final_routes1);
+    auto postprocessed_final_routes3 = postprocess_2OPT(vrp, final_routes);
+
+//~ weight_t postprocessed_final_routes_cost;
+#pragma omp parallel for
+    for (unsigned zzz = 0; zzz < final_routes.size(); ++zzz)
+    {
+        // include the better route between postprocessed_final_routes2[zzz] and postprocessed_final_routes3[zzz] in the final solution.
+
+        vector<node_t> postprocessed_route2 = postprocessed_final_routes2[zzz];
+        vector<node_t> postprocessed_route3 = postprocessed_final_routes3[zzz];
+
+        unsigned sz2 = postprocessed_route2.size();
+        unsigned sz3 = postprocessed_route3.size();
+
+        // finding the cost of postprocessed_route2
+
+        weight_t postprocessed_route2_cost = 0.0;
+        //~ postprocessed_route2_cost += L2_dist(points.x_coords[postprocessed_route2[0]], points.y_coords[postprocessed_route2[0]], 0, 0); // computing distance of the first point in the route with the depot.
+        postprocessed_route2_cost += vrp.get_dist(DEPOT, postprocessed_route2[0]); // computing distance of the first point in the route with the depot.
+        for (unsigned jj = 1; jj < sz2; ++jj)
+        {
+            //~ postprocessed_route2_cost += L2_dist(points.x_coords[postprocessed_route2[jj-1]], points.y_coords[postprocessed_route2[jj-1]], points.x_coords[postprocessed_route2[jj]], points.y_coords[postprocessed_route2[jj]]);
+            postprocessed_route2_cost += vrp.get_dist(postprocessed_route2[jj - 1], postprocessed_route2[jj]);
+        }
+        //~ postprocessed_route2_cost += L2_dist(points.x_coords[postprocessed_route2[sz2-1]], points.y_coords[postprocessed_route2[sz2-1]], 0, 0); // computing distance of the last point in the route with the depot.
+        postprocessed_route2_cost += vrp.get_dist(DEPOT, postprocessed_route2[sz2 - 1]);
+
+        // finding the cost of postprocessed_route3
+
+        weight_t postprocessed_route3_cost = 0.0;
+        //~ postprocessed_route3_cost += L2_dist(points.x_coords[postprocessed_route3[0]], points.y_coords[postprocessed_route3[0]], 0, 0); // computing distance of the first point in the route with the depot.
+        postprocessed_route3_cost += vrp.get_dist(DEPOT, postprocessed_route3[0]);
+        for (unsigned jj = 1; jj < sz3; ++jj)
+        {
+            //~ postprocessed_route3_cost += L2_dist(points.x_coords[postprocessed_route3[jj-1]], points.y_coords[postprocessed_route3[jj-1]], points.x_coords[postprocessed_route3[jj]], points.y_coords[postprocessed_route3[jj]]);
+            postprocessed_route3_cost += vrp.get_dist(postprocessed_route3[jj - 1], postprocessed_route3[jj]);
+        }
+        //~ postprocessed_route3_cost += L2_dist(points.x_coords[postprocessed_route3[sz3-1]], points.y_coords[postprocessed_route3[sz3-1]], 0, 0); // computing distance of the last point in the route with the depot.
+        postprocessed_route3_cost += vrp.get_dist(DEPOT, postprocessed_route3[sz3 - 1]);
+
+        // postprocessed_route2_cost is lower
+        if (postprocessed_route3_cost > postprocessed_route2_cost)
+        {
+            postprocessed_final_routes.push_back(postprocessed_route2);
+        }
+        // postprocessed_route3_cost is lower
+        else
+        {
+            postprocessed_final_routes.push_back(postprocessed_route3);
+        }
+    }
+
+    auto postprocessed_final_routes_cost = get_total_cost_of_routes(vrp, postprocessed_final_routes);
+
+    minCost = postprocessed_final_routes_cost;
+
+    return postprocessed_final_routes;
+}
+
 int main(int argc, char *argv[])
 {
     if (argc < 2)
@@ -557,8 +882,8 @@ int main(int argc, char *argv[])
 
     std::chrono::duration<double> elapsed = end_time - start_time;
     weight_t total_cost = calCost(vrp, routes);
-    // routes = postProcessIt(vrp, routes, total_cost);
-    // total_cost = calCost(vrp, routes);
+    routes = postProcessIt(vrp, routes, total_cost);
+    total_cost = calCost(vrp, routes);
     bool is_valid = verify_sol(vrp, routes, vrp.getCapacity());
 
     std::cout << "--- Parallel Clarke & Wright Savings Algorithm ---" << std::endl;
