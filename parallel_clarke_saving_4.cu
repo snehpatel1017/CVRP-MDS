@@ -350,13 +350,6 @@ __global__ void update_best_node_i(
 }
 
 __global__ void update_best_node_j(
-    int last_pointer,
-    node_t *customer_route_map,
-    demand_t *route_demands,
-    node_t *route_head,
-    node_t *route_tail,
-    node_t *next_customer,
-    node_t *prev_customer,
     node_t *best_saving_i_storage,
     node_t *best_saving_j_storage,
     weight_t *best_saving_value_storage,
@@ -369,22 +362,6 @@ __global__ void update_best_node_j(
     if ((best_saving_out->i == (unsigned int)local_best_i) && (local_best_saving_value == best_saving_out->value))
     {
         best_saving_out->j = (unsigned int)local_best_j;
-        node_t i = best_saving_out->i;
-        node_t j = best_saving_out->j;
-        node_t route_id_i = customer_route_map[i];
-        node_t route_id_j = customer_route_map[j];
-        node_t head_i = route_head[route_id_i];
-        node_t tail_i = route_tail[route_id_i];
-        node_t head_j = route_head[route_id_j];
-        node_t tail_j = route_tail[route_id_j];
-        next_customer[tail_i] = head_j;
-        prev_customer[head_j] = tail_i;
-        route_tail[route_id_i] = tail_j; // New tail is old tail of j
-        route_demands[route_id_i] += route_demands[route_id_j];
-        route_demands[route_id_j] = 0;
-        route_head[route_id_j] = DEPOT;
-        route_tail[route_id_j] = DEPOT;
-        customer_route_map[j] = customer_route_map[last_pointer];
     }
 }
 
@@ -483,6 +460,7 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
     checkCudaErrors(cudaMemcpy(d_prev_customer, h_prev_customer.data(), vrp.size * sizeof(node_t), cudaMemcpyHostToDevice));
     // Initialize the output struct on the GPU to a known "worst" state
     Saving h_best_saving_init = {INT_MAX, -1, 0};
+    checkCudaErrors(cudaMemcpy(d_best_saving_out, &h_best_saving_init, sizeof(Saving), cudaMemcpyHostToDevice));
 
     // --- 4. KERNEL LAUNCH ---
     dim3 threadsPerBlock(1024);
@@ -503,7 +481,7 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
 
         id++;
         // auto st = std::chrono::high_resolution_clock::now();
-        checkCudaErrors(cudaMemcpy(d_best_saving_out, &h_best_saving_init, sizeof(Saving), cudaMemcpyHostToDevice));
+
         find_best_saving_kernel<<<numBlocks, threadsPerBlock>>>(
             d_nodes, d_customer_route_map, d_route_demands, d_route_head, d_route_tail, d_dist_to_depot,
             d_best_saving_i_storage, d_best_saving_j_storage, d_best_saving_value_storage,
@@ -513,13 +491,6 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
             d_best_saving_i_storage, d_best_saving_value_storage, d_best_saving_out);
 
         update_best_node_j<<<numBlocks, threadsPerBlock>>>(
-            last_pointer,
-            d_customer_route_map,
-            d_route_demands,
-            d_route_head,
-            d_route_tail,
-            d_next_customer,
-            d_prev_customer,
             d_best_saving_i_storage, d_best_saving_j_storage, d_best_saving_value_storage, d_best_saving_out);
         checkCudaErrors(cudaDeviceSynchronize());
 
@@ -548,38 +519,57 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
         }
         pre_i = route_id_i;
         pre_j = route_id_j;
-        last_pointer--;
         // std::cout << route_id_i << " " << route_id_j << " : cpu\n";
 
         // Check if the merge is valid (different routes and combined demand is within capacity)
-        // if (route_id_i != route_id_j && h_route_demands[route_id_i] + h_route_demands[route_id_j] <= vrp.capacity)
-        // {
-        //     node_t head_i = h_route_head[route_id_i];
-        //     node_t tail_i = h_route_tail[route_id_i];
-        //     node_t head_j = h_route_head[route_id_j];
-        //     node_t tail_j = h_route_tail[route_id_j];
+        if (route_id_i != route_id_j && h_route_demands[route_id_i] + h_route_demands[route_id_j] <= vrp.capacity)
+        {
+            node_t head_i = h_route_head[route_id_i];
+            node_t tail_i = h_route_tail[route_id_i];
+            node_t head_j = h_route_head[route_id_j];
+            node_t tail_j = h_route_tail[route_id_j];
 
-        //     bool merged = false;
-        //     int type = -1;
+            bool merged = false;
+            int type = -1;
 
-        //     h_next_customer[tail_i] = head_j;
-        //     h_prev_customer[head_j] = tail_i;
-        //     h_route_tail[route_id_i] = tail_j; // New tail is old tail of j
-        //     h_route_demands[route_id_i] += h_route_demands[route_id_j];
-        //     h_route_demands[route_id_j] = 0;
-        //     h_customer_route_map[j] = h_customer_route_map[last_pointer];
-        //     h_route_head[route_id_j] = DEPOT;
-        //     h_route_tail[route_id_j] = DEPOT;
-        //     last_pointer--;
-        // }
+            h_next_customer[tail_i] = head_j;
+            h_prev_customer[head_j] = tail_i;
+            h_route_tail[route_id_i] = tail_j; // New tail is old tail of j
+            h_route_demands[route_id_i] += h_route_demands[route_id_j];
+            h_route_demands[route_id_j] = 0;
+            h_customer_route_map[j] = h_customer_route_map[last_pointer];
+            h_route_head[route_id_j] = DEPOT;
+            h_route_tail[route_id_j] = DEPOT;
+
+            update_gpu_mempory<<<1, 1>>>(
+                last_pointer,
+                d_customer_route_map,
+                d_route_demands,
+                d_route_head,
+                d_route_tail,
+                d_next_customer,
+                d_prev_customer,
+                d_best_saving_out,
+                NUM_CUSTOMERS,
+                i,
+                j,
+                route_id_i,
+                route_id_j,
+                head_i,
+                tail_i,
+                head_j,
+                tail_j);
+            checkCudaErrors(cudaDeviceSynchronize());
+            last_pointer--;
+        }
     }
     std::cout << "loop ended\n";
 
-    checkCudaErrors(cudaMemcpy(h_customer_route_map.data(), d_customer_route_map, (NUM_CUSTOMERS + 1) * sizeof(node_t), cudaMemcpyDeviceToHost));
+    // checkCudaErrors(cudaMemcpy(h_customer_route_map.data(), d_customer_route_map, (NUM_CUSTOMERS + 1) * sizeof(node_t), cudaMemcpyDeviceToHost));
     // checkCudaErrors(cudaMemcpy(h_route_demands.data(), d_route_demands, (NUM_CUSTOMERS + 1) * sizeof(demand_t), cudaMemcpyDeviceToHost));
-    checkCudaErrors(cudaMemcpy(h_route_head.data(), d_route_head, (NUM_CUSTOMERS + 1) * sizeof(node_t), cudaMemcpyDeviceToHost));
+    // checkCudaErrors(cudaMemcpy(h_route_head.data(), d_route_head, (NUM_CUSTOMERS + 1) * sizeof(node_t), cudaMemcpyDeviceToHost));
     // checkCudaErrors(cudaMemcpy(h_route_tail.data(), d_route_tail, (NUM_CUSTOMERS + 1) * sizeof(node_t), cudaMemcpyDeviceToHost));
-    checkCudaErrors(cudaMemcpy(h_next_customer.data(), d_next_customer, vrp.size * sizeof(node_t), cudaMemcpyDeviceToHost));
+    // checkCudaErrors(cudaMemcpy(h_next_customer.data(), d_next_customer, vrp.size * sizeof(node_t), cudaMemcpyDeviceToHost));
     // checkCudaErrors(cudaMemcpy(h_prev_customer.data(), d_prev_customer, vrp.size * sizeof(node_t), cudaMemcpyDeviceToHost));
     std::cout << "memory copied back to host\n";
     // --- 5. Finalize Routes ---
