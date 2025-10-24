@@ -21,9 +21,9 @@
 #include <deque>
 #include <sstream> //stringstream
 #include <cmath>   // For atan2
-
 #include <random>
 #include <chrono> //timing CPU
+#include <limits> // For std::numeric_limits
 
 unsigned DEBUGCODE = 0;
 #define DEBUG if (DEBUGCODE)
@@ -163,7 +163,8 @@ unsigned VRP::read(string filename)
 
     // DISTANCE TYPE
     getline(in, line);
-    type = line.find(":");
+    // type = line.find(":"); // This was likely a bug, line.find returns size_t
+    type = line.substr(line.find(":") + 2);
 
     // CAPACITY
     getline(in, line);
@@ -190,8 +191,9 @@ unsigned VRP::read(string filename)
         string xStr, yStr;
 
         iss >> id >> xStr >> yStr;
-        node[i].x = stof(xStr);
-        node[i].y = stof(yStr);
+        // Assuming IDs are 1-based and contiguous
+        node[id - 1].x = stof(xStr);
+        node[id - 1].y = stof(yStr);
     }
 
     // skip DEMAND_SECTION
@@ -206,9 +208,10 @@ unsigned VRP::read(string filename)
 
         iss >> id >> dStr;
 
-        node[i].demand = stof(dStr);
+        // Assuming IDs are 1-based and contiguous
+        node[id - 1].demand = stof(dStr);
 
-        // assert(i==(id-1));
+        // assert(i==(id-1)); // This assert would fail if IDs aren't 1..n
     }
     in.close();
 
@@ -222,7 +225,7 @@ void VRP::print()
     std::cout << "CAPACITY:" << capacity << '\n';
     for (auto i = 0u; i < size; ++i)
     {
-        std::cout << i << ':'
+        std::cout << (i + 1) << ':' // Print 1-based ID
                   << setw(6) << node[i].x << ' '
                   << setw(6) << node[i].y << ' '
                   << setw(6) << node[i].demand << std::endl;
@@ -293,7 +296,7 @@ std::vector<node_t> SweepHeuristic(const VRP &vrp)
 }
 // END: SWEEP HEURISTIC IMPLEMENTATION
 
-// Converts a permutation to set of routes
+// Converts a permutation to set of routes (Simple Split)
 std::vector<std::vector<node_t>>
 convertToVrpRoutes(const VRP &vrp, const std::vector<node_t> &singleRoute)
 {
@@ -305,7 +308,7 @@ convertToVrpRoutes(const VRP &vrp, const std::vector<node_t> &singleRoute)
 
     for (auto v : singleRoute)
     {
-        if (v == 0)
+        if (v == DEPOT) // Use constant
             continue;
         if (residueCap - vrp.node[v].demand >= 0)
         {
@@ -314,16 +317,23 @@ convertToVrpRoutes(const VRP &vrp, const std::vector<node_t> &singleRoute)
         }
         else
         { // new route
-            routes.push_back(aRoute);
+            if (!aRoute.empty())
+            {
+                routes.push_back(aRoute);
+            }
             aRoute.clear();
             aRoute.push_back(v);
             residueCap = vCapacity - vrp.node[v].demand;
         }
     }
-    routes.push_back(aRoute);
+    if (!aRoute.empty())
+    {
+        routes.push_back(aRoute);
+    }
     return routes;
 }
 
+// O(n) Optimal Splitting Algorithm
 std::vector<std::vector<node_t>>
 Split_convertToVrpRoutes(const VRP &vrp, const std::vector<node_t> &singleRoute)
 {
@@ -377,7 +387,7 @@ Split_convertToVrpRoutes(const VRP &vrp, const std::vector<node_t> &singleRoute)
         {
             double route_dist;
             if (i == j - 1)
-            { // Route with a single customer
+            { // Route with a single customer (customer_tour[i])
                 route_dist = vrp.get_dist(DEPOT, customer_tour[i]) + vrp.get_dist(customer_tour[i], DEPOT);
             }
             else
@@ -415,6 +425,7 @@ Split_convertToVrpRoutes(const VRP &vrp, const std::vector<node_t> &singleRoute)
         {
             if (i == 0)
                 return 0.0;
+            // Note: customer_tour[i-1] is the i-th customer
             return V[i] - sum_dist[i] + vrp.get_dist(DEPOT, customer_tour[i - 1]);
         };
 
@@ -445,7 +456,8 @@ Split_convertToVrpRoutes(const VRP &vrp, const std::vector<node_t> &singleRoute)
     std::reverse(final_routes.begin(), final_routes.end());
     return final_routes;
 }
-// Cost of a CVRP Solution!.
+
+// Cost of a CVRP Solution!. (Not used, but available)
 weight_t calRouteValue(const VRP &vrp, const std::vector<node_t> &aRoute, node_t depot = 1)
 { // return cost of "a" route
     weight_t routeVal = 0;
@@ -462,12 +474,7 @@ weight_t calRouteValue(const VRP &vrp, const std::vector<node_t> &aRoute, node_t
 }
 
 // Print in DIMACS output format http://dimacs.rutgers.edu/programs/challenge/vrp/cvrp/
-// Depot is 0
-// Route #1: 1 2 3
-// Route #2: 4 5
-// ...
-// Route #k: n-1 n
-//
+// Depot is 0 (though DIMACS is 1-based, this prints 0-based node IDs)
 void printOutput(const VRP &vrp, const std::vector<std::vector<node_t>> &final_routes)
 {
     weight_t total_cost = 0.0;
@@ -486,6 +493,9 @@ void printOutput(const VRP &vrp, const std::vector<std::vector<node_t>> &final_r
     {
         weight_t curr_route_cost = 0;
 
+        if (final_routes[ii].empty())
+            continue; // Skip empty routes
+
         curr_route_cost += vrp.get_dist(DEPOT, final_routes[ii][0]);
 
         for (unsigned jj = 1; jj < final_routes[ii].size(); ++jj)
@@ -500,6 +510,7 @@ void printOutput(const VRP &vrp, const std::vector<std::vector<node_t>> &final_r
     std::cout << "Cost " << total_cost << std::endl;
 }
 
+// Nearest Neighbor heuristic to construct a TSP tour
 void tsp_approx(const VRP &vrp, std::vector<node_t> &cities, std::vector<node_t> &tour, node_t ncities)
 {
     node_t i, j;
@@ -507,33 +518,40 @@ void tsp_approx(const VRP &vrp, std::vector<node_t> &cities, std::vector<node_t>
     weight_t CloseDist;
     //~ node_t endtour=0;
 
+    // cities contains customer nodes, and depot at the end (cities[ncities-1])
+    // tour is uninitialized
+
+    // Copy cities to tour, but rotate so depot is at tour[0]
     for (i = 1; i < ncities; i++)
-        tour[i] = cities[i - 1];
+        tour[i] = cities[i - 1];   //
+    tour[0] = cities[ncities - 1]; // Depot is at tour[0]
 
-    tour[0] = cities[ncities - 1];
+    // Now, tour[0] is depot, tour[1..ncities-1] are customers in original order
 
+    // Run Nearest Neighbor from the depot (tour[0])
     for (i = 1; i < ncities; i++)
     {
+        // Find node in tour[i..ncities-1] closest to tour[i-1]
         weight_t ThisX = vrp.node[tour[i - 1]].x;
         weight_t ThisY = vrp.node[tour[i - 1]].y;
         CloseDist = DBL_MAX;
-        for (j = ncities - 1;; j--)
+        ClosePt = i; // Default to current
+
+        for (j = i; j < ncities; j++) // Search from i to end
         {
             weight_t ThisDist = (vrp.node[tour[j]].x - ThisX) * (vrp.node[tour[j]].x - ThisX);
             if (ThisDist <= CloseDist)
             {
                 ThisDist += (vrp.node[tour[j]].y - ThisY) * (vrp.node[tour[j]].y - ThisY);
-                if (ThisDist <= CloseDist)
+                if (ThisDist < CloseDist) // Use < to find strictly closer
                 {
-                    if (j < i)
-                        break;
                     CloseDist = ThisDist;
                     ClosePt = j;
                 }
             }
         }
         /*swapping tour[i] and tour[ClosePt]*/
-        unsigned temp = tour[i];
+        node_t temp = tour[i];
         tour[i] = tour[ClosePt];
         tour[ClosePt] = temp;
     }
@@ -543,128 +561,139 @@ std::vector<std::vector<node_t>>
 postprocess_tsp_approx(const VRP &vrp, std::vector<std::vector<node_t>> &solRoutes)
 {
     std::vector<std::vector<node_t>> modifiedRoutes;
+    modifiedRoutes.resize(solRoutes.size()); // Pre-allocate
 
-    unsigned nroutes = solRoutes.size();
-    for (unsigned i = 0; i < nroutes; ++i)
+    // This loop is safe to parallelize if std::vector::push_back in inner loop is fixed
+    // But since it calls tsp_approx which isn't thread-safe on shared 'tour' array
+    // (if tour was shared), let's keep it serial unless we rewrite tsp_approx.
+    // The current implementation is safe *if* 'tour' is local to each thread.
+    // Let's assume it's meant to be parallel and make inner vectors local.
+    // However, the original code had no parallel pragma here.
+    for (unsigned i = 0; i < solRoutes.size(); ++i)
     {
-        // postprocessing solRoutes[i]
         unsigned sz = solRoutes[i].size();
+        if (sz == 0)
+            continue;
+
         std::vector<node_t> cities(sz + 1);
-        std::vector<node_t> tour(sz + 1);
+        std::vector<node_t> tour(sz + 1); // Aux array
 
         for (unsigned j = 0; j < sz; ++j)
             cities[j] = solRoutes[i][j];
 
-        cities[sz] = 0; // the last node is the depot.
+        cities[sz] = DEPOT; // the last node is the depot.
 
         tsp_approx(vrp, cities, tour, sz + 1);
 
         // the first element of the tour is now the depot. So, ignore tour[0] and insert the rest into the vector.
-
         vector<node_t> curr_route;
+        curr_route.reserve(sz); // Reserve space
         for (unsigned kk = 1; kk < sz + 1; ++kk)
         {
             curr_route.push_back(tour[kk]);
         }
 
-        modifiedRoutes.push_back(curr_route);
+        modifiedRoutes[i] = curr_route;
     }
     return modifiedRoutes;
 }
 
-void tsp_2opt(const VRP &vrp, std::vector<node_t> &cities, std::vector<node_t> &tour, unsigned ncities)
+// 2-OPT implementation for a single route
+void tsp_2opt(const VRP &vrp, std::vector<node_t> &cities, unsigned ncities)
 {
-    // 'cities' contains the original solution. It is updated during the course of the 2opt-scheme to contain the 2opt soln.
-    // 'tour' is an auxillary array.
+    // 'cities' contains the original solution (customers only). It is updated in-place.
+    if (ncities < 2)
+        return; // Not enough nodes to swap
 
     // repeat until no improvement is made
     unsigned improve = 0;
 
-    while (improve < 2)
+    while (improve < 2) // Loop twice to ensure stability
     {
         double best_distance = 0.0;
 
-        best_distance += vrp.get_dist(DEPOT, cities[0]); // computing distance of the first point in the route with the depot.
-
+        best_distance += vrp.get_dist(DEPOT, cities[0]);
         for (unsigned jj = 1; jj < ncities; ++jj)
         {
             best_distance += vrp.get_dist(cities[jj - 1], cities[jj]);
         }
-
         best_distance += vrp.get_dist(DEPOT, cities[ncities - 1]);
+
+        bool improvement_found = false;
 
         for (unsigned i = 0; i < ncities - 1; i++)
         {
             for (unsigned k = i + 1; k < ncities; k++)
             {
+                // Calculate cost of swapping edges (i-1, i) and (k, k+1)
+                // with (i-1, k) and (i, k+1)
+                // Note: i-1 and k+1 need to handle depot cases
 
-                double new_distance = best_distance;
-                if (i == 0)
-                    new_distance -= vrp.get_dist(DEPOT, cities[i]);
-                else
-                    new_distance -= vrp.get_dist(cities[i - 1], cities[i]);
+                weight_t current_edge_cost = 0;
+                weight_t new_edge_cost = 0;
 
-                if (k == ncities - 1)
-                    new_distance -= vrp.get_dist(cities[k], DEPOT);
-                else
-                    new_distance -= vrp.get_dist(cities[k], cities[k + 1]);
+                // Edge 1: (i-1) -> i
+                current_edge_cost += (i == 0) ? vrp.get_dist(DEPOT, cities[i]) : vrp.get_dist(cities[i - 1], cities[i]);
+                // Edge 2: k -> (k+1)
+                current_edge_cost += (k == ncities - 1) ? vrp.get_dist(cities[k], DEPOT) : vrp.get_dist(cities[k], cities[k + 1]);
 
-                if (i == 0)
-                    new_distance += vrp.get_dist(DEPOT, cities[k]);
-                else
-                    new_distance += vrp.get_dist(cities[i - 1], cities[k]);
+                // New Edge 1: (i-1) -> k
+                new_edge_cost += (i == 0) ? vrp.get_dist(DEPOT, cities[k]) : vrp.get_dist(cities[i - 1], cities[k]);
+                // New Edge 2: i -> (k+1)
+                new_edge_cost += (k == ncities - 1) ? vrp.get_dist(cities[i], DEPOT) : vrp.get_dist(cities[i], cities[k + 1]);
 
-                if (k == ncities - 1)
-                    new_distance += vrp.get_dist(cities[i], DEPOT);
-                else
-                    new_distance += vrp.get_dist(cities[i], cities[k + 1]);
-
-                if (new_distance < best_distance)
+                if (new_edge_cost < current_edge_cost - 1e-9) // Use epsilon for floating point
                 {
-                    // Improvement found so reset
-                    improve = 0;
+                    // Improvement found
+                    improvement_found = true;
+
+                    // Reverse the segment from i to k
                     int left_ptr = i, right_ptr = k;
-                    while (left_ptr <= right_ptr)
+                    while (left_ptr < right_ptr)
                     {
                         swap(cities[left_ptr++], cities[right_ptr--]);
                     }
-                    best_distance = new_distance;
+
+                    // Update best_distance for the next iteration of i/k
+                    best_distance = best_distance - current_edge_cost + new_edge_cost;
                 }
             }
         }
-        improve++;
+
+        if (improvement_found)
+        {
+            improve = 0; // Reset improvement counter
+        }
+        else
+        {
+            improve++; // No improvement in this full pass
+        }
     }
 }
+
 std::vector<std::vector<node_t>>
 postprocess_2OPT(const VRP &vrp, std::vector<std::vector<node_t>> &final_routes)
 {
     std::vector<std::vector<node_t>> postprocessed_final_routes;
+    postprocessed_final_routes.resize(final_routes.size()); // Pre-allocate
 
-    unsigned nroutes = final_routes.size();
-    for (unsigned i = 0; i < nroutes; ++i)
+// This loop is safe to parallelize
+#pragma omp parallel for
+    for (unsigned i = 0; i < final_routes.size(); ++i)
     {
-        // postprocessing final_routes[i]
         unsigned sz = final_routes[i].size();
-        //~ unsigned* cities = (unsigned*) malloc(sizeof(unsigned) * (sz));
-        //~ unsigned* tour = (unsigned*) malloc(sizeof(unsigned) * (sz));  // this is an auxillary array
+        if (sz == 0)
+            continue;
 
-        std::vector<node_t> cities(sz);
-        std::vector<node_t> tour(sz);
+        // Copy route to a local vector for 2-OPT
+        std::vector<node_t> cities = final_routes[i];
 
-        for (unsigned j = 0; j < sz; ++j)
-            cities[j] = final_routes[i][j];
-
-        vector<node_t> curr_route;
-
-        if (sz > 2)                          // for sz <= 1, the cost of the path cannot change. So no point running this.
-            tsp_2opt(vrp, cities, tour, sz); // MAIN
-
-        for (unsigned kk = 0; kk < sz; ++kk)
+        if (sz >= 2) // for sz < 2, 2-opt can't do anything
         {
-            curr_route.push_back(cities[kk]);
+            tsp_2opt(vrp, cities, sz); // MAIN
         }
 
-        postprocessed_final_routes.push_back(curr_route);
+        postprocessed_final_routes[i] = cities;
     }
     return postprocessed_final_routes;
 }
@@ -672,17 +701,20 @@ postprocess_2OPT(const VRP &vrp, std::vector<std::vector<node_t>> &final_routes)
 weight_t get_total_cost_of_routes(const VRP &vrp, vector<vector<node_t>> &final_routes)
 {
     weight_t total_cost = 0.0;
+
+// This loop is safe to parallelize with reduction
+#pragma omp parallel for reduction(+ : total_cost)
     for (unsigned ii = 0; ii < final_routes.size(); ++ii)
     {
         weight_t curr_route_cost = 0;
-        //~ curr_route_cost += L2_dist(points.x_coords[final_routes[ii][0]], points.y_coords[final_routes[ii][0]], 0, 0); // computing distance of the first point in the route with the depot.
+        if (final_routes[ii].empty())
+            continue;
+
         curr_route_cost += vrp.get_dist(DEPOT, final_routes[ii][0]);
         for (unsigned jj = 1; jj < final_routes[ii].size(); ++jj)
         {
-            //~ curr_route_cost += L2_dist(points.x_coords[final_routes[ii][jj-1]], points.y_coords[final_routes[ii][jj-1]], points.x_coords[final_routes[ii][jj]], points.y_coords[final_routes[ii][jj]]);
             curr_route_cost += vrp.get_dist(final_routes[ii][jj - 1], final_routes[ii][jj]);
         }
-        //~ curr_route_cost += L2_dist(points.x_coords[final_routes[ii][final_routes[ii].size()-1]], points.y_coords[final_routes[ii][final_routes[ii].size()-1]], 0, 0); // computing distance of the last point in the route with the depot.
         curr_route_cost += vrp.get_dist(DEPOT, final_routes[ii][final_routes[ii].size() - 1]);
 
         total_cost += curr_route_cost;
@@ -697,13 +729,15 @@ weight_t get_total_cost_of_routes(const VRP &vrp, vector<vector<node_t>> &final_
 std::vector<std::vector<node_t>>
 postProcessIt(const VRP &vrp, std::vector<std::vector<node_t>> &final_routes, weight_t &minCost)
 {
-    std::vector<std::vector<node_t>> postprocessed_final_routes;
-
+    // Run two different post-processing pipelines
     auto postprocessed_final_routes1 = postprocess_tsp_approx(vrp, final_routes);
     auto postprocessed_final_routes2 = postprocess_2OPT(vrp, postprocessed_final_routes1);
     auto postprocessed_final_routes3 = postprocess_2OPT(vrp, final_routes);
 
-//~ weight_t postprocessed_final_routes_cost;
+    // *** FIX ***: Pre-allocate vector to avoid race condition
+    std::vector<std::vector<node_t>> postprocessed_final_routes(final_routes.size());
+
+// *** FIX ***: This loop is now safe for parallelism
 #pragma omp parallel for
     for (unsigned zzz = 0; zzz < final_routes.size(); ++zzz)
     {
@@ -716,40 +750,40 @@ postProcessIt(const VRP &vrp, std::vector<std::vector<node_t>> &final_routes, we
         unsigned sz3 = postprocessed_route3.size();
 
         // finding the cost of postprocessed_route2
-
         weight_t postprocessed_route2_cost = 0.0;
-        //~ postprocessed_route2_cost += L2_dist(points.x_coords[postprocessed_route2[0]], points.y_coords[postprocessed_route2[0]], 0, 0); // computing distance of the first point in the route with the depot.
-        postprocessed_route2_cost += vrp.get_dist(DEPOT, postprocessed_route2[0]); // computing distance of the first point in the route with the depot.
-        for (unsigned jj = 1; jj < sz2; ++jj)
+        if (sz2 > 0)
         {
-            //~ postprocessed_route2_cost += L2_dist(points.x_coords[postprocessed_route2[jj-1]], points.y_coords[postprocessed_route2[jj-1]], points.x_coords[postprocessed_route2[jj]], points.y_coords[postprocessed_route2[jj]]);
-            postprocessed_route2_cost += vrp.get_dist(postprocessed_route2[jj - 1], postprocessed_route2[jj]);
+            postprocessed_route2_cost += vrp.get_dist(DEPOT, postprocessed_route2[0]);
+            for (unsigned jj = 1; jj < sz2; ++jj)
+            {
+                postprocessed_route2_cost += vrp.get_dist(postprocessed_route2[jj - 1], postprocessed_route2[jj]);
+            }
+            postprocessed_route2_cost += vrp.get_dist(DEPOT, postprocessed_route2[sz2 - 1]);
         }
-        //~ postprocessed_route2_cost += L2_dist(points.x_coords[postprocessed_route2[sz2-1]], points.y_coords[postprocessed_route2[sz2-1]], 0, 0); // computing distance of the last point in the route with the depot.
-        postprocessed_route2_cost += vrp.get_dist(DEPOT, postprocessed_route2[sz2 - 1]);
 
         // finding the cost of postprocessed_route3
-
         weight_t postprocessed_route3_cost = 0.0;
-        //~ postprocessed_route3_cost += L2_dist(points.x_coords[postprocessed_route3[0]], points.y_coords[postprocessed_route3[0]], 0, 0); // computing distance of the first point in the route with the depot.
-        postprocessed_route3_cost += vrp.get_dist(DEPOT, postprocessed_route3[0]);
-        for (unsigned jj = 1; jj < sz3; ++jj)
+        if (sz3 > 0)
         {
-            //~ postprocessed_route3_cost += L2_dist(points.x_coords[postprocessed_route3[jj-1]], points.y_coords[postprocessed_route3[jj-1]], points.x_coords[postprocessed_route3[jj]], points.y_coords[postprocessed_route3[jj]]);
-            postprocessed_route3_cost += vrp.get_dist(postprocessed_route3[jj - 1], postprocessed_route3[jj]);
+            postprocessed_route3_cost += vrp.get_dist(DEPOT, postprocessed_route3[0]);
+            for (unsigned jj = 1; jj < sz3; ++jj)
+            {
+                postprocessed_route3_cost += vrp.get_dist(postprocessed_route3[jj - 1], postprocessed_route3[jj]);
+            }
+            postprocessed_route3_cost += vrp.get_dist(DEPOT, postprocessed_route3[sz3 - 1]);
         }
-        //~ postprocessed_route3_cost += L2_dist(points.x_coords[postprocessed_route3[sz3-1]], points.y_coords[postprocessed_route3[sz3-1]], 0, 0); // computing distance of the last point in the route with the depot.
-        postprocessed_route3_cost += vrp.get_dist(DEPOT, postprocessed_route3[sz3 - 1]);
 
         // postprocessed_route2_cost is lower
-        if (postprocessed_route3_cost > postprocessed_route2_cost)
+        if (sz2 > 0 && (sz3 == 0 || postprocessed_route3_cost > postprocessed_route2_cost))
         {
-            postprocessed_final_routes.push_back(postprocessed_route2);
+            // *** FIX ***: Assign to index, don't push_back
+            postprocessed_final_routes[zzz] = postprocessed_route2;
         }
         // postprocessed_route3_cost is lower
         else
         {
-            postprocessed_final_routes.push_back(postprocessed_route3);
+            // *** FIX ***: Assign to index, don't push_back
+            postprocessed_final_routes[zzz] = postprocessed_route3;
         }
     }
 
@@ -760,18 +794,23 @@ postProcessIt(const VRP &vrp, std::vector<std::vector<node_t>> &final_routes, we
     return postprocessed_final_routes;
 }
 
+// Calculates total cost of a solution
 std::pair<weight_t, std::vector<std::vector<node_t>>>
 calCost(const VRP &vrp, const std::vector<std::vector<node_t>> &final_routes)
 {
     weight_t total_cost = 0.0;
 
+// *** FIX ***: Removed incorrect nested parallel loop. This outer loop is correct.
 #pragma omp parallel for reduction(+ : total_cost)
     for (unsigned ii = 0; ii < final_routes.size(); ++ii)
     {
         weight_t curr_route_cost = 0;
+        if (final_routes[ii].empty())
+            continue;
+
         curr_route_cost += vrp.get_dist(DEPOT, final_routes[ii][0]);
 
-#pragma omp parallel for reduction(+ : curr_route_cost)
+        // This inner loop should be serial; parallelizing it is massive overhead
         for (unsigned jj = 1; jj < final_routes[ii].size(); ++jj)
         {
             curr_route_cost += vrp.get_dist(final_routes[ii][jj - 1], final_routes[ii][jj]);
@@ -790,32 +829,40 @@ bool verify_sol(const VRP &vrp, vector<vector<node_t>> final_routes, unsigned ca
      * 2. For every route, the capacity constraint is respected.
      **/
 
-    unsigned *hist = (unsigned *)malloc(sizeof(unsigned) * vrp.getSize());
-    memset(hist, 0, sizeof(unsigned) * vrp.getSize());
+    std::vector<unsigned> hist(vrp.getSize(), 0);
 
     for (unsigned i = 0; i < final_routes.size(); ++i)
     {
         unsigned route_sum_of_demands = 0;
         for (unsigned j = 0; j < final_routes[i].size(); ++j)
         {
-            //~ route_sum_of_demands += points.demands[final_routes[i][j]];
-            route_sum_of_demands += vrp.node[final_routes[i][j]].demand;
-            hist[final_routes[i][j]] += 1;
+            node_t customer = final_routes[i][j];
+            if (customer == DEPOT || customer >= (node_t)vrp.getSize())
+            {
+                std::cerr << "ERROR: Route includes depot or invalid node ID!" << std::endl;
+                return false; // Routes shouldn't contain depot
+            }
+
+            route_sum_of_demands += vrp.node[customer].demand;
+            hist[customer] += 1;
         }
         if (route_sum_of_demands > capacity)
         {
+            std::cerr << "ERROR: Route " << i << " exceeds capacity! " << route_sum_of_demands << " > " << capacity << std::endl;
             return false;
         }
     }
 
-    for (unsigned i = 1; i < vrp.getSize(); ++i)
+    for (unsigned i = 1; i < vrp.getSize(); ++i) // Start from 1 (skip depot)
     {
         if (hist[i] > 1)
         {
+            std::cerr << "ERROR: Customer " << i << " visited " << hist[i] << " times!" << std::endl;
             return false;
         }
         if (hist[i] == 0)
         {
+            std::cerr << "ERROR: Customer " << i << " not visited!" << std::endl;
             return false;
         }
     }
@@ -836,13 +883,18 @@ int main(int argc, char *argv[])
 
     for (int ii = 2; ii < argc; ii += 2)
     {
+        if (ii + 1 >= argc)
+        {
+            std::cerr << "INVALID Arguments! Missing value for " << argv[ii] << '\n';
+            exit(1);
+        }
         if (std::string(argv[ii]) == "-round")
             vrp.params.toRound = atoi(argv[ii + 1]);
         else if (std::string(argv[ii]) == "-nthreads")
             vrp.params.nThreads = atoi(argv[ii + 1]);
         else
         {
-            std::cerr << "INVALID Arguments!" << '\n';
+            std::cerr << "INVALID Argument: " << argv[ii] << '\n';
             std::cerr << "Usage:" << argv[0] << " toy.vrp -nthreads 20 -round 1" << '\n';
             exit(1);
         }
@@ -850,19 +902,14 @@ int main(int argc, char *argv[])
 
     vrp.read(argv[1]);
 
+    // vrp.print(); // Uncomment to debug VRP parsing
+
     // START TIMER
     std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
 
     // =========================================================================
     // MODIFICATION: Replace MST + DFS with Sweep Heuristic
     // =========================================================================
-
-    // OLD MST-based approach is removed.
-    // auto mstG = PrimsAlgo(vrp);
-    // std::vector<bool> visited(mstG.size(), false);
-    // visited[0] = true;
-    // std::vector<int> singleRoute;
-    // ShortCircutTour(mstG, visited, 0, singleRoute);
 
     // NEW: Generate the initial tour using the Sweep Heuristic
     std::vector<node_t> singleRoute = SweepHeuristic(vrp);
