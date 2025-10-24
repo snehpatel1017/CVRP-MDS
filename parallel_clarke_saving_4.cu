@@ -361,7 +361,8 @@ __global__ void update_best_node_j(
     double local_best_saving_value = best_saving_value_storage[tid];
     if ((best_saving_out->i == (unsigned int)local_best_i) && (local_best_saving_value == best_saving_out->value))
     {
-        best_saving_out->j = (unsigned int)local_best_j;
+        atomicMin((unsigned int *)&(best_saving_out->j), (unsigned int)local_best_j);
+        // printf("%lld  \n", tid);
     }
 }
 
@@ -374,18 +375,16 @@ __global__ void update_gpu_mempory(
     node_t *next_customer,
     node_t *prev_customer,
     Saving *best_saving_out,
-    int num_customers,
-    node_t i,
-    node_t j,
-    node_t route_id_i,
-    node_t route_id_j,
-    node_t head_i,
-    node_t tail_i,
-    node_t head_j,
-    node_t tail_j)
+    int num_customers)
 {
     // cg::grid_group grid = cg::this_grid();
-
+    node_t i = best_saving_out->i;
+    node_t j = best_saving_out->j;
+    node_t route_id_i = customer_route_map[i];
+    node_t route_id_j = customer_route_map[j];
+    node_t tail_i = route_tail[route_id_i];
+    node_t head_j = route_head[route_id_j];
+    node_t tail_j = route_tail[route_id_j];
     next_customer[tail_i] = head_j;
     prev_customer[head_j] = tail_i;
     route_tail[route_id_i] = tail_j; // New tail is old tail of j
@@ -396,7 +395,7 @@ __global__ void update_gpu_mempory(
     customer_route_map[j] = customer_route_map[last_pointer];
     best_saving_out->value = 0;
     best_saving_out->i = INT_MAX;
-    best_saving_out->j = -1;
+    best_saving_out->j = INT_MAX;
 }
 
 std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
@@ -436,6 +435,10 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
     node_t *d_next_customer;
     node_t *d_prev_customer;
 
+    dim3 threadsPerBlock(1024);
+    dim3 numBlocks(56);
+    long long totalThreads = threadsPerBlock.x * numBlocks.x;
+
     checkCudaErrors(cudaMalloc(&d_nodes, (NUM_CUSTOMERS + 1) * sizeof(Point)));
     checkCudaErrors(cudaMalloc(&d_customer_route_map, (NUM_CUSTOMERS + 1) * sizeof(node_t)));
     checkCudaErrors(cudaMalloc(&d_route_demands, (NUM_CUSTOMERS + 1) * sizeof(demand_t)));
@@ -443,9 +446,9 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
     checkCudaErrors(cudaMalloc(&d_route_tail, (NUM_CUSTOMERS + 1) * sizeof(node_t)));
     checkCudaErrors(cudaMalloc(&d_best_saving_out, sizeof(Saving)));
     checkCudaErrors(cudaMalloc(&d_dist_to_depot, (NUM_CUSTOMERS + 1) * sizeof(weight_t)));
-    checkCudaErrors(cudaMalloc(&d_best_saving_i_storage, (40 * 1024) * sizeof(node_t)));
-    checkCudaErrors(cudaMalloc(&d_best_saving_j_storage, (40 * 1024) * sizeof(node_t)));
-    checkCudaErrors(cudaMalloc(&d_best_saving_value_storage, (40 * 1024) * sizeof(weight_t)));
+    checkCudaErrors(cudaMalloc(&d_best_saving_i_storage, (totalThreads) * sizeof(node_t)));
+    checkCudaErrors(cudaMalloc(&d_best_saving_j_storage, (totalThreads) * sizeof(node_t)));
+    checkCudaErrors(cudaMalloc(&d_best_saving_value_storage, (totalThreads) * sizeof(weight_t)));
     checkCudaErrors(cudaMalloc(&d_next_customer, vrp.size * sizeof(node_t)));
     checkCudaErrors(cudaMalloc(&d_prev_customer, vrp.size * sizeof(node_t)));
 
@@ -459,21 +462,15 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
     checkCudaErrors(cudaMemcpy(d_next_customer, h_next_customer.data(), vrp.size * sizeof(node_t), cudaMemcpyHostToDevice));
     checkCudaErrors(cudaMemcpy(d_prev_customer, h_prev_customer.data(), vrp.size * sizeof(node_t), cudaMemcpyHostToDevice));
     // Initialize the output struct on the GPU to a known "worst" state
-    Saving h_best_saving_init = {INT_MAX, -1, 0};
+    Saving h_best_saving_init = {INT_MAX, INT_MAX, 0};
     checkCudaErrors(cudaMemcpy(d_best_saving_out, &h_best_saving_init, sizeof(Saving), cudaMemcpyHostToDevice));
 
     // --- 4. KERNEL LAUNCH ---
-    dim3 threadsPerBlock(1024);
-    dim3 numBlocks(40);
-
-    int threads_per_block = std::min(1024, NUM_CUSTOMERS);
-    int numBlocks1D = std::min(40, (NUM_CUSTOMERS + threads_per_block - 1) / threads_per_block);
 
     Saving h_result;
 
     // --- 4. Merge Routes Greedily (Sequential) ---
     int id = 0;
-    int pre_i = -1, pre_j = -1;
     int last_pointer = NUM_CUSTOMERS;
     while (true)
     {
@@ -492,14 +489,10 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
 
         update_best_node_j<<<numBlocks, threadsPerBlock>>>(
             d_best_saving_i_storage, d_best_saving_j_storage, d_best_saving_value_storage, d_best_saving_out);
+
         checkCudaErrors(cudaDeviceSynchronize());
-
-        // auto en = std::chrono::high_resolution_clock::now();
-        // std::chrono::duration<double> diff = en - st;
-        // std::cout << "Kernel-1 Time: " << diff.count() << " s\n";
-
         checkCudaErrors(cudaMemcpy(&h_result, d_best_saving_out, sizeof(Saving), cudaMemcpyDeviceToHost));
-        // std::cout << h_result.value << "\n";
+
         if (h_result.value <= 1e-6)
         {
             std::cout << "No more positive savings found. Halting." << std::endl;
@@ -507,25 +500,6 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
             break; // Exit the while loop
         }
 
-        node_t i = h_result.i;
-        node_t j = h_result.j;
-
-        node_t route_id_i = h_customer_route_map[i];
-        node_t route_id_j = h_customer_route_map[j];
-        if (route_id_i == pre_i && route_id_j == pre_j)
-        {
-            std::cout << "Stuck in a loop. Halting." << std::endl;
-            break;
-        }
-        pre_i = route_id_i;
-        pre_j = route_id_j;
-        // std::cout << route_id_i << " " << route_id_j << " : cpu\n";
-
-        // Check if the merge is valid (different routes and combined demand is within capacity)
-        node_t head_i = h_route_head[route_id_i];
-        node_t tail_i = h_route_tail[route_id_i];
-        node_t head_j = h_route_head[route_id_j];
-        node_t tail_j = h_route_tail[route_id_j];
         update_gpu_mempory<<<1, 1>>>(
             last_pointer,
             d_customer_route_map,
@@ -535,35 +509,16 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
             d_next_customer,
             d_prev_customer,
             d_best_saving_out,
-            NUM_CUSTOMERS,
-            i,
-            j,
-            route_id_i,
-            route_id_j,
-            head_i,
-            tail_i,
-            head_j,
-            tail_j);
-
-        h_next_customer[tail_i] = head_j;
-        h_prev_customer[head_j] = tail_i;
-        h_route_tail[route_id_i] = tail_j; // New tail is old tail of j
-        h_route_demands[route_id_i] += h_route_demands[route_id_j];
-        h_route_demands[route_id_j] = 0;
-        h_customer_route_map[j] = h_customer_route_map[last_pointer];
-        h_route_head[route_id_j] = DEPOT;
-        h_route_tail[route_id_j] = DEPOT;
-
-        checkCudaErrors(cudaDeviceSynchronize());
+            NUM_CUSTOMERS);
         last_pointer--;
     }
     std::cout << "loop ended\n";
 
-    // checkCudaErrors(cudaMemcpy(h_customer_route_map.data(), d_customer_route_map, (NUM_CUSTOMERS + 1) * sizeof(node_t), cudaMemcpyDeviceToHost));
+    checkCudaErrors(cudaMemcpy(h_customer_route_map.data(), d_customer_route_map, (NUM_CUSTOMERS + 1) * sizeof(node_t), cudaMemcpyDeviceToHost));
     // checkCudaErrors(cudaMemcpy(h_route_demands.data(), d_route_demands, (NUM_CUSTOMERS + 1) * sizeof(demand_t), cudaMemcpyDeviceToHost));
-    // checkCudaErrors(cudaMemcpy(h_route_head.data(), d_route_head, (NUM_CUSTOMERS + 1) * sizeof(node_t), cudaMemcpyDeviceToHost));
+    checkCudaErrors(cudaMemcpy(h_route_head.data(), d_route_head, (NUM_CUSTOMERS + 1) * sizeof(node_t), cudaMemcpyDeviceToHost));
     // checkCudaErrors(cudaMemcpy(h_route_tail.data(), d_route_tail, (NUM_CUSTOMERS + 1) * sizeof(node_t), cudaMemcpyDeviceToHost));
-    // checkCudaErrors(cudaMemcpy(h_next_customer.data(), d_next_customer, vrp.size * sizeof(node_t), cudaMemcpyDeviceToHost));
+    checkCudaErrors(cudaMemcpy(h_next_customer.data(), d_next_customer, vrp.size * sizeof(node_t), cudaMemcpyDeviceToHost));
     // checkCudaErrors(cudaMemcpy(h_prev_customer.data(), d_prev_customer, vrp.size * sizeof(node_t), cudaMemcpyDeviceToHost));
     std::cout << "memory copied back to host\n";
     // --- 5. Finalize Routes ---
