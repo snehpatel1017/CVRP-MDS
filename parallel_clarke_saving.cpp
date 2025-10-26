@@ -338,43 +338,12 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
                     route_head[route_id_i] = head_j; // New head is old head of j
                     merged = true;
                 }
-                // Case 3: Tail of i connects to Tail of j [...i] -> [...j](reversed)
-                // else if (tail_i == i && tail_j == j)
-                // {
-
-                //     next_customer[j] = prev_customer[j];
-                //     next_customer[i] = j;
-                //     prev_customer[j] = i;
-                //     route_tail[route_id_i] = head_j; // New tail is old head of j
-                //     merged = true;
-                //     reverse = 0;
-                // }
-                // // Case 4: Head of i connects to Head of j [i...](reversed) <- [j...]
-                // else if (head_i == i && head_j == j)
-                // {
-                //     prev_customer[i] = next_customer[i];
-                //     next_customer[j] = i;
-                //     prev_customer[i] = j;
-                //     route_head[route_id_i] = tail_j; // New head is old tail of j
-                //     merged = true;
-                //     reverse = 1;
-                // }
-
                 if (merged)
                 {
                     route_demands[route_id_i] += route_demands[route_id_j];
                     customer_route_map[head_j] = route_id_i;
                     customer_route_map[tail_j] = route_id_i;
                     route_demands[route_id_j] = 0;
-
-                    // for (node_t curr = 1; curr < vrp.getSize(); curr++)
-                    // {
-                    //     if (customer_route_map[curr] == route_id_j)
-                    //     {
-                    //         customer_route_map[curr] = route_id_i;
-                    //     }
-                    // }
-
                     route_head[route_id_j] = DEPOT;
                     route_tail[route_id_j] = DEPOT;
                 }

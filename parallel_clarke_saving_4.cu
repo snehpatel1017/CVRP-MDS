@@ -436,7 +436,7 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
     node_t *d_prev_customer;
 
     dim3 threadsPerBlock(1024);
-    dim3 numBlocks(56);
+    dim3 numBlocks(40);
     long long totalThreads = threadsPerBlock.x * numBlocks.x;
 
     checkCudaErrors(cudaMalloc(&d_nodes, (NUM_CUSTOMERS + 1) * sizeof(Point)));
@@ -578,6 +578,14 @@ int main(int argc, char *argv[])
     // routes = postProcessIt(vrp, routes, total_cost);
     // total_cost = calCost(vrp, routes);
     bool is_valid = verify_sol(vrp, routes, vrp.getCapacity());
+    // for (auto x : routes)
+    // {
+    //     for (auto y : x)
+    //     {
+    //         cout << y << ",";
+    //     }
+    //     cout << "\n";
+    // }
 
     std::cout << "--- Parallel Clarke & Wright Savings Algorithm ---" << std::endl;
     std::cout << "Problem File: " << argv[1] << std::endl;

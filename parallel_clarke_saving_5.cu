@@ -198,194 +198,155 @@ __device__ int get_pair_mathematical(long long global_index, int n)
     return current_i;
 }
 
-// __device__ volatile unsigned long long int global_counter_1 = 0;
+__device__ volatile unsigned int global_counter = 0;
 // __device__ volatile unsigned long long int global_counter_2 = 0;
 
-__global__ void find_best_saving_kernel(
+__global__ void find_crush(
     const Point *nodes,
     const node_t *customer_route_map,
-    const demand_t *route_demands,
+    const weight_t *route_demands,
     const node_t *route_head,
     const node_t *route_tail,
     const weight_t *dist_to_depot,
-    node_t *best_saving_i_storage,
-    node_t *best_saving_j_storage,
-    weight_t *best_saving_value_storage,
-    Saving *best_saving_out,
-    int num_customers,
-    demand_t capacity)
+    node_t *crush,
+    demand_t capacity,
+    unsigned int last_index)
 {
-
-    long long tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int total_threads = gridDim.x * blockDim.x;
-    unsigned long long n = (unsigned long long)num_customers + 1;
-    unsigned long long total_pairs = (unsigned long long)num_customers * (num_customers + 1) / 2;
-
-    for (int i = tid; curr <= num_customers; curr += total_threads)
+    unsigned int limit = last_index;
+    for (int i = tid; i <= limit; i += total_threads)
     {
-        if (customer_route_map[i] != i)
+        if (i == 0)
             continue;
-        double local_best_saving_value = 0.0;
-        int local_best_j = -1;
-        for (int j = 1; j <= num_customers; j++)
+
+        int favourite = -1;
+        double best_saving = 0.0;
+        demand_t final_cap = DBL_MAX;
+        node_t route_id_i = customer_route_map[i];
+        demand_t my_demands = route_demands[route_id_i];
+        node_t front_i = route_head[route_id_i];
+        node_t back_i = route_tail[route_id_i];
+        if (front_i == DEPOT || back_i == DEPOT)
+            continue;
+        for (int j = 1; j <= limit; j++)
         {
             if (j == i)
                 continue;
 
-            // --- 2. Check validity of merging pair (i, j) ---
-            node_t route_id_i = customer_route_map[i];
             node_t route_id_j = customer_route_map[j];
-
-            if ((route_id_i == route_id_j) || (route_id_i < 0) || (route_id_j < 0))
-                continue;
-            if (route_demands[route_id_i] + route_demands[route_id_j] > capacity)
-                continue;
-
-            node_t front_i = route_head[route_id_i];
-            node_t back_i = route_tail[route_id_i];
             node_t front_j = route_head[route_id_j];
             node_t back_j = route_tail[route_id_j];
-            if (front_i == DEPOT || back_i == DEPOT || front_j == DEPOT || back_j == DEPOT)
+            demand_t j_demand = route_demands[route_id_j];
+            if (my_demands + j_demand > capacity)
+                continue;
+            if (front_j == DEPOT || back_j == DEPOT)
                 continue;
 
-            // if (!((i == back_i && j == front_j) || (j == back_j && i == front_i)))
-            // {
-            //     continue;
-            // }
-
-            // --- 3. Calculate saving if the merge is valid ---
-            double saving_value_1 = dist_to_depot[back_i]                                   // dist(i, depot)
-                                    + dist_to_depot[front_j]                                // dist(j, depot)
-                                    - device_euclidean_dist(nodes[back_i], nodes[front_j]); // dist(i, j)
-
-            if (local_best_saving_value < saving_value_1)
+            double saving_1 = dist_to_depot[back_i] + dist_to_depot[front_j] - device_euclidean_dist(nodes[back_i], nodes[front_j]);
+            double saving_2 = dist_to_depot[back_j] + dist_to_depot[front_i] - device_euclidean_dist(nodes[back_j], nodes[front_i]);
+            if (best_saving < saving_1)
             {
-                local_best_saving_value = saving_value_1;
-
-                local_best_j = j;
+                best_saving = saving_1;
+                favourite = j;
+                final_cap = my_demands + j_demand;
             }
-        }
-
-        best_saving_j_storage[i] = local_best_j;
-        best_saving_value_storage[i] = local_best_saving_value;
-    }
-
-    // unsigned long long int *global_max_addr_ull = (unsigned long long int *)&(best_saving_out->value);
-
-    // unsigned long long int new_val_ull = __double_as_longlong(local_best_saving_value);
-
-    // atomicMax(global_max_addr_ull, new_val_ull);
-
-    // __syncthreads();
-    // if (threadIdx.x == 0)
-    // {
-    //     atomicAdd((unsigned long long int *)&global_counter_1, 1);
-    // }
-    // while (global_counter_1 < 40)
-    // {
-    // }
-
-    // if (local_best_saving_value == best_saving_out->value)
-    // {
-    //     atomicMin((unsigned int *)&(best_saving_out->i), (unsigned int)local_best_i);
-    // }
-    // __syncthreads();
-    // if (threadIdx.x == 0)
-    // {
-    //     atomicAdd((unsigned long long int *)&global_counter_2, 1);
-    // }
-    // while (global_counter_2 < 40)
-    // {
-    // }
-
-    // if ((best_saving_out->i == (unsigned int)local_best_i) && (local_best_saving_value == best_saving_out->value))
-    // {
-    //     best_saving_out->j = (unsigned int)local_best_j;
-    // }
-
-    // unsigned long long int *address_as_ull = (unsigned long long int *)&(best_saving_out->value);
-
-    // // Read the current maximum value from global memory.
-    // double current_max_val = __longlong_as_double(*address_as_ull);
-
-    // // This loop continues as long as this thread's saving is better than the global max.
-    // while (local_best_saving_value > current_max_val)
-    // {
-    //     // Convert our local values to their bit representations for the atomic operation.
-    //     unsigned long long int assumed_ull = __double_as_longlong(current_max_val);
-    //     unsigned long long int new_val_ull = __double_as_longlong(local_best_saving_value);
-
-    //     unsigned long long int prev_val_ull = atomicCAS(address_as_ull, assumed_ull, new_val_ull);
-
-    //     if (prev_val_ull == assumed_ull)
-    //     {
-    //         // Now this thread has the exclusive right to update the i and j indices.
-    //         best_saving_out->i = local_best_i;
-    //         best_saving_out->j = local_best_j;
-    //         break; // Success, exit the loop.
-    //     }
-
-    //     current_max_val = __longlong_as_double(prev_val_ull);
-    // }
-}
-
-__global__ void update_best_node_i(
-    node_t *best_saving_i_storage,
-    weight_t *best_saving_value_storage,
-    Saving *best_saving_out)
-{
-    long long tid = blockIdx.x * blockDim.x + threadIdx.x;
-    int total_threads = gridDim.x * blockDim.x;
-
-    for (int i = tid; i <= NUM_CUSTOMERS; i += total_threads)
-    {
-        if (customer_route_map[i] != i)
-            continue;
-        int pos = 1;
-
-        for (int j = 1; j <= NUM_CUSTOMERS; j++)
-        {
-            if (i == j)
-                continue;
-            if (best_saving_value_storage[i] < best_saving_value_storage[j])
+            if (best_saving < saving_2)
             {
-                pos++;
+                best_saving = saving_2;
+                favourite = j;
+                final_cap = my_demands + j_demand;
             }
-            else if (best_saving_value_storage[i] == best_saving_value_storage[j])
+            if (best_saving == saving_1 || best_saving == saving_2)
             {
-                if (i < j)
+                if (favourite == -1)
                 {
-                    pos++;
+                    favourite = j;
+                    continue;
                 }
+                if (final_cap > my_demands + j_demand)
+                {
+                    favourite = j;
+                    final_cap = my_demands + j_demand;
+                    continue;
+                }
+                favourite = min(favourite, j);
             }
         }
-        best_i_storage[pos] = i;
+
+        crush[i] = favourite;
+        // if (favourite != -1)
+        // printf("%d has crush : %d with saving value : %f, and my demands is this : %f, and crush's demands is %f\n", i, crush[i], best_saving, my_demands, route_demands[customer_route_map[favourite]]);
     }
 }
 
-__global__ void update_best_node_j(
-    int last_pointer,
+__global__ void engagement(
+    const Point *nodes,
     node_t *customer_route_map,
-    demand_t *route_demands,
     node_t *route_head,
     node_t *route_tail,
-    node_t *next_customer,
-    node_t *prev_customer,
-    node_t *best_saving_i_storage,
-    node_t *best_saving_j_storage,
-    weight_t *best_saving_value_storage,
-    Saving *best_saving_out)
+    node_t *crush,
+    const weight_t *dist_to_depot,
+    node_t *store_i,
+    node_t *store_j,
+    unsigned int last_index)
 {
-    for (int i = 1; i <= num_customers; i++)
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_threads = gridDim.x * blockDim.x;
+
+    for (int i = tid; i <= last_index; i += total_threads)
     {
-        if (customer_route_map[i] != i)
+        if (crush[i] == -1)
             continue;
-        int j = best_saving_j_storage[i];
-        if (j == -1 || route_demands[customer_route_map[i]] + route_demands[customer_route_map[j]] > capacity)
+
+        int j = crush[i];
+        if (crush[j] != i)
             continue;
+
         node_t route_id_i = customer_route_map[i];
         node_t route_id_j = customer_route_map[j];
         node_t head_i = route_head[route_id_i];
+        node_t tail_i = route_tail[route_id_i];
+        node_t head_j = route_head[route_id_j];
+        node_t tail_j = route_tail[route_id_j];
+        double saving_1 = dist_to_depot[tail_i] + dist_to_depot[head_j] - device_euclidean_dist(nodes[tail_i], nodes[head_j]);
+        double saving_2 = dist_to_depot[tail_j] + dist_to_depot[head_i] - device_euclidean_dist(nodes[tail_j], nodes[head_i]);
+        if (saving_1 < saving_2)
+        {
+            continue;
+        }
+        if (saving_1 == saving_2)
+        {
+            if (i > j)
+                continue;
+        }
+        int old_pos = atomicAdd((unsigned int *)&global_counter, (unsigned int)1);
+        store_i[old_pos] = i;
+        store_j[old_pos] = j;
+    }
+}
+
+__global__ void merging(
+    node_t *store_i,
+    node_t *store_j,
+    node_t *customer_route_map,
+    weight_t *route_demands,
+    node_t *route_head,
+    node_t *route_tail,
+    node_t *next_customer,
+    node_t *prev_customer)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_threads = gridDim.x * blockDim.x;
+    for (int curr = tid; curr < global_counter; curr += total_threads)
+    {
+        node_t i = store_i[curr];
+        node_t j = store_j[curr];
+
+        node_t route_id_i = customer_route_map[i];
+        node_t route_id_j = customer_route_map[j];
+        // printf("%d is i and %d is j\n", route_id_i, route_id_j);
+        // printf("%f is demand of i and %f is demand of j\n", route_demands[route_id_i], route_demands[route_id_j]);
         node_t tail_i = route_tail[route_id_i];
         node_t head_j = route_head[route_id_j];
         node_t tail_j = route_tail[route_id_j];
@@ -394,44 +355,37 @@ __global__ void update_best_node_j(
         route_tail[route_id_i] = tail_j; // New tail is old tail of j
         route_demands[route_id_i] += route_demands[route_id_j];
         route_demands[route_id_j] = 0;
+        // printf("%f is new demand of i and %f is new demand of j\n", route_demands[route_id_i], route_demands[route_id_j]);
         route_head[route_id_j] = DEPOT;
         route_tail[route_id_j] = DEPOT;
-        customer_route_map[j] = customer_route_map[last_pointer];
+        customer_route_map[j] = -1;
     }
+    // if (tid == 0)
+    // {
+    //     for (int i = 0; i <= 5; i++)
+    //     {
+    //         printf("from cuda side %d has demands %f\n", i, route_demands[i]);
+    //     }
+    // }
 }
 
-__global__ void update_gpu_mempory(
-    int last_pointer,
+__global__ void cleanup(
     node_t *customer_route_map,
-    demand_t *route_demands,
-    node_t *route_head,
-    node_t *route_tail,
-    node_t *next_customer,
-    node_t *prev_customer,
-    Saving *best_saving_out,
-    int num_customers,
-    node_t i,
-    node_t j,
-    node_t route_id_i,
-    node_t route_id_j,
-    node_t head_i,
-    node_t tail_i,
-    node_t head_j,
-    node_t tail_j)
+    node_t *crush,
+    unsigned int last_index,
+    unsigned int *slow_pointer)
 {
-    // cg::grid_group grid = cg::this_grid();
-
-    next_customer[tail_i] = head_j;
-    prev_customer[head_j] = tail_i;
-    route_tail[route_id_i] = tail_j; // New tail is old tail of j
-    route_demands[route_id_i] += route_demands[route_id_j];
-    route_demands[route_id_j] = 0;
-    route_head[route_id_j] = DEPOT;
-    route_tail[route_id_j] = DEPOT;
-    customer_route_map[j] = customer_route_map[last_pointer];
-    best_saving_out->value = 0;
-    best_saving_out->i = INT_MAX;
-    best_saving_out->j = -1;
+    *slow_pointer = 0;
+    global_counter = 0;
+    for (int i = 1; i <= last_index; i++)
+    {
+        if (customer_route_map[i] != -1)
+        {
+            (*slow_pointer)++;
+            customer_route_map[*slow_pointer] = customer_route_map[i];
+        }
+        crush[i] = -1;
+    }
 }
 
 std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
@@ -445,7 +399,8 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
     std::vector<node_t> h_route_tail(NUM_CUSTOMERS + 1);
     std::vector<node_t> h_next_customer(vrp.size, DEPOT);
     std::vector<node_t> h_prev_customer(vrp.size, DEPOT);
-    std::vector<node_t> temporary(vrp.size, DEPOT);
+    std::vector<node_t> h_crush(vrp.size, -1);
+    unsigned int h_slow_pointer = NUM_CUSTOMERS;
 
     for (int i = 1; i <= NUM_CUSTOMERS; ++i)
     {
@@ -463,26 +418,30 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
     demand_t *d_route_demands;
     node_t *d_route_head;
     node_t *d_route_tail;
-    node_t *d_best_saving_i_storage;
-    node_t *d_best_saving_j_storage;
-    weight_t *d_best_saving_value_storage;
-    Saving *d_best_saving_out;
     weight_t *d_dist_to_depot;
     node_t *d_next_customer;
     node_t *d_prev_customer;
+    node_t *d_crush;
+    node_t *d_store_i;
+    node_t *d_store_j;
+    unsigned int *d_slow_pointer;
+
+    dim3 threadsPerBlock(1024);
+    dim3 numBlocks(56);
+    // long long totalThreads = threadsPerBlock.x * numBlocks.x;
 
     checkCudaErrors(cudaMalloc(&d_nodes, (NUM_CUSTOMERS + 1) * sizeof(Point)));
     checkCudaErrors(cudaMalloc(&d_customer_route_map, (NUM_CUSTOMERS + 1) * sizeof(node_t)));
     checkCudaErrors(cudaMalloc(&d_route_demands, (NUM_CUSTOMERS + 1) * sizeof(demand_t)));
     checkCudaErrors(cudaMalloc(&d_route_head, (NUM_CUSTOMERS + 1) * sizeof(node_t)));
     checkCudaErrors(cudaMalloc(&d_route_tail, (NUM_CUSTOMERS + 1) * sizeof(node_t)));
-    checkCudaErrors(cudaMalloc(&d_best_saving_out, sizeof(Saving)));
     checkCudaErrors(cudaMalloc(&d_dist_to_depot, (NUM_CUSTOMERS + 1) * sizeof(weight_t)));
-    checkCudaErrors(cudaMalloc(&d_best_saving_i_storage, (NUM_CUSTOMERS + 1) * sizeof(node_t)));
-    checkCudaErrors(cudaMalloc(&d_best_saving_j_storage, (40 * 1024) * sizeof(node_t)));
-    checkCudaErrors(cudaMalloc(&d_best_saving_value_storage, (NUM_CUSTOMERS + 1) * sizeof(weight_t)));
-    checkCudaErrors(cudaMalloc(&d_next_customer, vrp.size * sizeof(node_t)));
-    checkCudaErrors(cudaMalloc(&d_prev_customer, vrp.size * sizeof(node_t)));
+    checkCudaErrors(cudaMalloc(&d_next_customer, (NUM_CUSTOMERS + 1) * sizeof(node_t)));
+    checkCudaErrors(cudaMalloc(&d_prev_customer, (NUM_CUSTOMERS + 1) * sizeof(node_t)));
+    checkCudaErrors(cudaMalloc(&d_crush, (NUM_CUSTOMERS + 1) * sizeof(node_t)));
+    checkCudaErrors(cudaMalloc(&d_store_i, ((NUM_CUSTOMERS) / 2 + 1) * sizeof(node_t)));
+    checkCudaErrors(cudaMalloc(&d_store_j, ((NUM_CUSTOMERS) / 2 + 1) * sizeof(node_t)));
+    checkCudaErrors(cudaMalloc(&d_slow_pointer, sizeof(unsigned int)));
 
     // --- 3. HOST -> DEVICE: Copy data to GPU ---
     checkCudaErrors(cudaMemcpy(d_nodes, vrp.node.data(), (NUM_CUSTOMERS + 1) * sizeof(Point), cudaMemcpyHostToDevice));
@@ -491,99 +450,69 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
     checkCudaErrors(cudaMemcpy(d_route_head, h_route_head.data(), (NUM_CUSTOMERS + 1) * sizeof(node_t), cudaMemcpyHostToDevice));
     checkCudaErrors(cudaMemcpy(d_route_tail, h_route_tail.data(), (NUM_CUSTOMERS + 1) * sizeof(node_t), cudaMemcpyHostToDevice));
     checkCudaErrors(cudaMemcpy(d_dist_to_depot, vrp.dist_to_depot.data(), (NUM_CUSTOMERS + 1) * sizeof(weight_t), cudaMemcpyHostToDevice));
-    checkCudaErrors(cudaMemcpy(d_next_customer, h_next_customer.data(), vrp.size * sizeof(node_t), cudaMemcpyHostToDevice));
-    checkCudaErrors(cudaMemcpy(d_prev_customer, h_prev_customer.data(), vrp.size * sizeof(node_t), cudaMemcpyHostToDevice));
-    // Initialize the output struct on the GPU to a known "worst" state
-    Saving h_best_saving_init = {INT_MAX, -1, 0};
+    checkCudaErrors(cudaMemcpy(d_next_customer, h_next_customer.data(), (NUM_CUSTOMERS + 1) * sizeof(node_t), cudaMemcpyHostToDevice));
+    checkCudaErrors(cudaMemcpy(d_prev_customer, h_prev_customer.data(), (NUM_CUSTOMERS + 1) * sizeof(node_t), cudaMemcpyHostToDevice));
+    checkCudaErrors(cudaMemcpy(d_crush, h_crush.data(), (NUM_CUSTOMERS + 1) * sizeof(node_t), cudaMemcpyHostToDevice));
+    checkCudaErrors(cudaMemcpy(d_slow_pointer, &h_slow_pointer, sizeof(unsigned int), cudaMemcpyHostToDevice));
 
-    // --- 4. KERNEL LAUNCH ---
-    dim3 threadsPerBlock(1024);
-    dim3 numBlocks(40);
-
-    int threads_per_block = std::min(1024, NUM_CUSTOMERS);
-    int numBlocks1D = std::min(40, (NUM_CUSTOMERS + threads_per_block - 1) / threads_per_block);
-
-    Saving h_result;
-
-    // --- 4. Merge Routes Greedily (Sequential) ---
     int id = 0;
-    int pre_i = -1, pre_j = -1;
-    int last_pointer = NUM_CUSTOMERS;
+    unsigned int last_index = NUM_CUSTOMERS;
+
     while (true)
     {
         // std::cout << id++ << "\n";
-
         id++;
         // auto st = std::chrono::high_resolution_clock::now();
-        checkCudaErrors(cudaMemcpy(d_best_saving_out, &h_best_saving_init, sizeof(Saving), cudaMemcpyHostToDevice));
-        find_best_saving_kernel<<<numBlocks, threadsPerBlock>>>(
-            d_nodes, d_customer_route_map, d_route_demands, d_route_head, d_route_tail, d_dist_to_depot,
-            d_best_saving_i_storage, d_best_saving_j_storage, d_best_saving_value_storage,
-            d_best_saving_out, last_pointer, CAPACITY);
 
-        update_best_node_i<<<numBlocks, threadsPerBlock>>>(
-            d_best_saving_i_storage, d_best_saving_value_storage, d_best_saving_out);
+        find_crush<<<numBlocks, threadsPerBlock>>>(
+            d_nodes,
+            d_customer_route_map,
+            d_route_demands,
+            d_route_head,
+            d_route_tail,
+            d_dist_to_depot,
+            d_crush,
+            CAPACITY,
+            last_index);
 
-        update_best_node_j<<<numBlocks, threadsPerBlock>>>(
-            last_pointer,
+        engagement<<<numBlocks, threadsPerBlock>>>(
+            d_nodes,
+            d_customer_route_map,
+            d_route_head,
+            d_route_tail,
+            d_crush,
+            d_dist_to_depot,
+            d_store_i,
+            d_store_j,
+            last_index);
+
+        merging<<<numBlocks, threadsPerBlock>>>(
+            d_store_i,
+            d_store_j,
             d_customer_route_map,
             d_route_demands,
             d_route_head,
             d_route_tail,
             d_next_customer,
-            d_prev_customer,
-            d_best_saving_i_storage, d_best_saving_j_storage, d_best_saving_value_storage, d_best_saving_out);
+            d_prev_customer);
+
+        cleanup<<<1, 1>>>(
+            d_customer_route_map,
+            d_crush,
+            last_index,
+            d_slow_pointer);
+
         checkCudaErrors(cudaDeviceSynchronize());
+        checkCudaErrors(cudaMemcpy(&h_slow_pointer, d_slow_pointer, sizeof(unsigned int), cudaMemcpyDeviceToHost));
 
-        // auto en = std::chrono::high_resolution_clock::now();
-        // std::chrono::duration<double> diff = en - st;
-        // std::cout << "Kernel-1 Time: " << diff.count() << " s\n";
-
-        checkCudaErrors(cudaMemcpy(&h_result, d_best_saving_out, sizeof(Saving), cudaMemcpyDeviceToHost));
-        // std::cout << h_result.value << "\n";
-        if (h_result.value <= 1e-6)
+        std::cout << h_slow_pointer << " , " << last_index << "\n";
+        if (h_slow_pointer == last_index)
         {
             std::cout << "No more positive savings found. Halting." << std::endl;
             std::cout << id << "\n";
             break; // Exit the while loop
         }
-
-        node_t i = h_result.i;
-        node_t j = h_result.j;
-
-        node_t route_id_i = h_customer_route_map[i];
-        node_t route_id_j = h_customer_route_map[j];
-        if (route_id_i == pre_i && route_id_j == pre_j)
-        {
-            std::cout << "Stuck in a loop. Halting." << std::endl;
-            break;
-        }
-        pre_i = route_id_i;
-        pre_j = route_id_j;
-        last_pointer--;
-        // std::cout << route_id_i << " " << route_id_j << " : cpu\n";
-
-        // Check if the merge is valid (different routes and combined demand is within capacity)
-        // if (route_id_i != route_id_j && h_route_demands[route_id_i] + h_route_demands[route_id_j] <= vrp.capacity)
-        // {
-        //     node_t head_i = h_route_head[route_id_i];
-        //     node_t tail_i = h_route_tail[route_id_i];
-        //     node_t head_j = h_route_head[route_id_j];
-        //     node_t tail_j = h_route_tail[route_id_j];
-
-        //     bool merged = false;
-        //     int type = -1;
-
-        //     h_next_customer[tail_i] = head_j;
-        //     h_prev_customer[head_j] = tail_i;
-        //     h_route_tail[route_id_i] = tail_j; // New tail is old tail of j
-        //     h_route_demands[route_id_i] += h_route_demands[route_id_j];
-        //     h_route_demands[route_id_j] = 0;
-        //     h_customer_route_map[j] = h_customer_route_map[last_pointer];
-        //     h_route_head[route_id_j] = DEPOT;
-        //     h_route_tail[route_id_j] = DEPOT;
-        //     last_pointer--;
-        // }
+        last_index = h_slow_pointer;
     }
     std::cout << "loop ended\n";
 
@@ -598,7 +527,7 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
     std::vector<std::vector<node_t>> final_routes;
     std::vector<bool> visited_routes(vrp.size, false);
 
-    for (node_t i = 1; i <= last_pointer; ++i)
+    for (node_t i = 1; i <= last_index; ++i)
     {
         node_t route_id = h_customer_route_map[i];
 
@@ -607,6 +536,7 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
         node_t current_node = h_route_head[route_id];
         while (current_node != DEPOT)
         {
+            // std::cout << current_node << " , ";
             current_route.push_back(current_node);
             current_node = h_next_customer[current_node];
         }
@@ -614,18 +544,10 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
         {
             final_routes.push_back(current_route);
         }
+        // std::cout << "\n";
     }
     std::cout << "routes generated\n";
 
-    // checkCudaErrors(cudaFree(d_nodes));
-    // checkCudaErrors(cudaFree(d_customer_route_map));
-    // checkCudaErrors(cudaFree(d_route_demands));
-    // checkCudaErrors(cudaFree(d_best_saving_out));
-    // checkCudaErrors(cudaFree(d_dist_to_depot));
-    // checkCudaErrors(cudaFree(d_route_head));
-    // checkCudaErrors(cudaFree(d_route_tail));
-    // checkCudaErrors(cudaFree(d_next_customer));
-    // checkCudaErrors(cudaFree(d_prev_customer));
     checkCudaErrors(cudaDeviceReset());
 
     return final_routes;

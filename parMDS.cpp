@@ -263,7 +263,6 @@ PrimsAlgo(const VRP &vrp, std::vector<std::vector<Edge>> &graph)
 {
   auto N = graph.size();
   const node_t INIT = -1;
-  //! std::cout<< "N "<< N << '\n';
 
   std::vector<weight_t> key(N, INT_MAX);
   std::vector<weight_t> toEdges(N, -1);
