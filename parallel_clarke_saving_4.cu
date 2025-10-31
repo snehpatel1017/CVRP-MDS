@@ -22,8 +22,6 @@
 
 namespace cg = cooperative_groups;
 
-using namespace std;
-
 using point_t = double;
 using weight_t = double;
 using demand_t = double;
@@ -132,7 +130,7 @@ weight_t calCost(const VRP &vrp, const std::vector<std::vector<node_t>> &routes)
     return total_cost;
 }
 
-bool verify_sol(const VRP &vrp, vector<vector<node_t>> final_routes, unsigned capacity)
+bool verify_sol(const VRP &vrp, std::vector<std::vector<node_t>> final_routes, unsigned capacity)
 {
     /* verifies if the solution is valid or not */
     /**
@@ -345,6 +343,7 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
 {
     const int NUM_CUSTOMERS = vrp.getSize() - 1; // Exclude depot
     const demand_t CAPACITY = vrp.getCapacity();
+    std::cout << "Number of Customers: " << NUM_CUSTOMERS << "\n";
 
     std::vector<node_t> h_customer_route_map(NUM_CUSTOMERS + 1);
     std::vector<demand_t> h_route_demands(NUM_CUSTOMERS + 1);
