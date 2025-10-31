@@ -201,7 +201,7 @@ __device__ int get_pair_mathematical(long long global_index, int n)
 __device__ volatile unsigned int global_counter = 0;
 // __device__ volatile unsigned long long int global_counter_2 = 0;
 
-__global__ void find_crush(
+__global__ void find_buddy_per_node(
     const Point *nodes,
     const node_t *customer_route_map,
     const weight_t *route_demands,
@@ -280,7 +280,7 @@ __global__ void find_crush(
     }
 }
 
-__global__ void engagement(
+__global__ void get_pairs(
     const Point *nodes,
     node_t *customer_route_map,
     node_t *route_head,
@@ -427,7 +427,7 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
     unsigned int *d_slow_pointer;
 
     dim3 threadsPerBlock(1024);
-    dim3 numBlocks(56);
+    dim3 numBlocks((int)(NUM_CUSTOMERS + threadsPerBlock.x - 1) / threadsPerBlock.x);
     // long long totalThreads = threadsPerBlock.x * numBlocks.x;
 
     checkCudaErrors(cudaMalloc(&d_nodes, (NUM_CUSTOMERS + 1) * sizeof(Point)));
@@ -457,14 +457,15 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
 
     int id = 0;
     unsigned int last_index = NUM_CUSTOMERS;
-
+    std::chrono::time_point<std::chrono::high_resolution_clock> st, en;
     while (true)
     {
-        // std::cout << id++ << "\n";
-        id++;
-        // auto st = std::chrono::high_resolution_clock::now();
 
-        find_crush<<<numBlocks, threadsPerBlock>>>(
+        id++;
+        if (id == 1)
+            st = std::chrono::high_resolution_clock::now();
+
+        find_buddy_per_node<<<numBlocks, threadsPerBlock>>>(
             d_nodes,
             d_customer_route_map,
             d_route_demands,
@@ -475,7 +476,7 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
             CAPACITY,
             last_index);
 
-        engagement<<<numBlocks, threadsPerBlock>>>(
+        get_pairs<<<numBlocks, threadsPerBlock>>>(
             d_nodes,
             d_customer_route_map,
             d_route_head,
@@ -505,7 +506,7 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
         checkCudaErrors(cudaDeviceSynchronize());
         checkCudaErrors(cudaMemcpy(&h_slow_pointer, d_slow_pointer, sizeof(unsigned int), cudaMemcpyDeviceToHost));
 
-        std::cout << h_slow_pointer << " , " << last_index << "\n";
+        // std::cout << h_slow_pointer << " , " << last_index << "\n";
         if (h_slow_pointer == last_index)
         {
             std::cout << "No more positive savings found. Halting." << std::endl;
@@ -513,6 +514,12 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
             break; // Exit the while loop
         }
         last_index = h_slow_pointer;
+        if (id == 1)
+        {
+            en = std::chrono::high_resolution_clock::now();
+            std::chrono::duration<double> elapsed = en - st;
+            std::cout << "Time for first iteration: " << elapsed.count() << " seconds\n";
+        }
     }
     std::cout << "loop ended\n";
 

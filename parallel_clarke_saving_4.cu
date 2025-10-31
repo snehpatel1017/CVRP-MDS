@@ -248,11 +248,6 @@ __global__ void find_best_saving_kernel(
         if (front_i == DEPOT || back_i == DEPOT || front_j == DEPOT || back_j == DEPOT)
             continue;
 
-        // if (!((i == back_i && j == front_j) || (j == back_j && i == front_i)))
-        // {
-        //     continue;
-        // }
-
         // --- 3. Calculate saving if the merge is valid ---
         double saving_value_1 = dist_to_depot[back_i]                                   // dist(i, depot)
                                 + dist_to_depot[front_j]                                // dist(j, depot)
@@ -282,58 +277,6 @@ __global__ void find_best_saving_kernel(
     unsigned long long int new_val_ull = __double_as_longlong(local_best_saving_value);
 
     atomicMax(global_max_addr_ull, new_val_ull);
-
-    // __syncthreads();
-    // if (threadIdx.x == 0)
-    // {
-    //     atomicAdd((unsigned long long int *)&global_counter_1, 1);
-    // }
-    // while (global_counter_1 < 40)
-    // {
-    // }
-
-    // if (local_best_saving_value == best_saving_out->value)
-    // {
-    //     atomicMin((unsigned int *)&(best_saving_out->i), (unsigned int)local_best_i);
-    // }
-    // __syncthreads();
-    // if (threadIdx.x == 0)
-    // {
-    //     atomicAdd((unsigned long long int *)&global_counter_2, 1);
-    // }
-    // while (global_counter_2 < 40)
-    // {
-    // }
-
-    // if ((best_saving_out->i == (unsigned int)local_best_i) && (local_best_saving_value == best_saving_out->value))
-    // {
-    //     best_saving_out->j = (unsigned int)local_best_j;
-    // }
-
-    // unsigned long long int *address_as_ull = (unsigned long long int *)&(best_saving_out->value);
-
-    // // Read the current maximum value from global memory.
-    // double current_max_val = __longlong_as_double(*address_as_ull);
-
-    // // This loop continues as long as this thread's saving is better than the global max.
-    // while (local_best_saving_value > current_max_val)
-    // {
-    //     // Convert our local values to their bit representations for the atomic operation.
-    //     unsigned long long int assumed_ull = __double_as_longlong(current_max_val);
-    //     unsigned long long int new_val_ull = __double_as_longlong(local_best_saving_value);
-
-    //     unsigned long long int prev_val_ull = atomicCAS(address_as_ull, assumed_ull, new_val_ull);
-
-    //     if (prev_val_ull == assumed_ull)
-    //     {
-    //         // Now this thread has the exclusive right to update the i and j indices.
-    //         best_saving_out->i = local_best_i;
-    //         best_saving_out->j = local_best_j;
-    //         break; // Success, exit the loop.
-    //     }
-
-    //     current_max_val = __longlong_as_double(prev_val_ull);
-    // }
 }
 
 __global__ void update_best_node_i(
@@ -435,8 +378,10 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
     node_t *d_next_customer;
     node_t *d_prev_customer;
 
+    cudaDeviceProp prop;
+    cudaGetDeviceProperties(&prop, 0);
     dim3 threadsPerBlock(1024);
-    dim3 numBlocks(40);
+    dim3 numBlocks((int)prop.multiProcessorCount);
     long long totalThreads = threadsPerBlock.x * numBlocks.x;
 
     checkCudaErrors(cudaMalloc(&d_nodes, (NUM_CUSTOMERS + 1) * sizeof(Point)));
@@ -468,17 +413,15 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
     // --- 4. KERNEL LAUNCH ---
 
     Saving h_result;
-
-    // --- 4. Merge Routes Greedily (Sequential) ---
     int id = 0;
     int last_pointer = NUM_CUSTOMERS;
+    std::chrono::time_point<std::chrono::high_resolution_clock> st, en;
     while (true)
     {
-        // std::cout << id++ << "\n";
 
         id++;
-        // auto st = std::chrono::high_resolution_clock::now();
-
+        if (id == 1)
+            st = std::chrono::high_resolution_clock::now();
         find_best_saving_kernel<<<numBlocks, threadsPerBlock>>>(
             d_nodes, d_customer_route_map, d_route_demands, d_route_head, d_route_tail, d_dist_to_depot,
             d_best_saving_i_storage, d_best_saving_j_storage, d_best_saving_value_storage,
@@ -511,6 +454,12 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
             d_best_saving_out,
             NUM_CUSTOMERS);
         last_pointer--;
+        if (id == 1)
+        {
+            en = std::chrono::high_resolution_clock::now();
+            std::chrono::duration<double> elapsed = en - st;
+            std::cout << "Time for first iteration: " << elapsed.count() << " seconds\n";
+        }
     }
     std::cout << "loop ended\n";
 
