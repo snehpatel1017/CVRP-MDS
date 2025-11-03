@@ -1,4 +1,3 @@
-%%writefile generate_instance.py
 import random
 import math
 import argparse
