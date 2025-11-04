@@ -1,107 +1,254 @@
-import random
-import math
-import argparse
+import sys, random, math, os
 
-def generate_locations(num_customers, max_coord=100, distribution='R', num_clusters=5, cluster_std_dev=10):
-    """
-    Generates customer locations based on a specified distribution.
+# To plot the instance, uncomment the next five lines and the twelve last lines (it deteriorates performance)
+# import matplotlib as mpl
+# if os.environ.get('DISPLAY','') == '':
+#     print('no display found. Using non-interactive Agg backend')
+#     mpl.use('Agg')
+# import matplotlib.pyplot as plt
 
-    Args:
-        num_customers (int): The number of customers.
-        max_coord (int): The maximum value for x and y coordinates.
-        distribution (str): 'R' for Random, 'C' for Clustered, 'RC' for Random-Clustered.
-        num_clusters (int): The number of cluster centers for 'C' and 'RC'.
-        cluster_std_dev (int): The standard deviation for clusters.
+if len(sys.argv) < 8:
+    print('Missing arguments:\n\t python generate.py n depotPos custPos demandType avgRouteSize instanceID randSeed')
+    help="""
 
-    Returns:
-        list: A list of (x, y) tuples for each customer.
-    """
-    locations = []
-    if distribution in ['C', 'RC']:
-        # 1. Create random cluster centers
-        cluster_centers = [(random.randint(0, max_coord), random.randint(0, max_coord)) for _ in range(num_clusters)]
+    n (number of customers)
 
-    if distribution == 'R': # Purely Random
-        for _ in range(num_customers):
-            locations.append((random.randint(0, max_coord), random.randint(0, max_coord)))
+    Depot positioning
+        1 = Random				
+        2 = Centered				
+        3 = Cornered				
+                        
+    Customer positioning
+        1 = Random				
+        2 = Clustered				
+        3 = Random-clustered		
+                        
+    Demand distribution	
+        1 = Unitary		
+        2 = Small, large var		
+        3 = Small, small var		
+        4 = Large, large var		
+        5 = Large, small var		
+        6 = Large, depending on quadrant	
+        7 = Few large, many small
 
-    elif distribution == 'C': # Purely Clustered
-        for _ in range(num_customers):
-            center_x, center_y = random.choice(cluster_centers)
-            x = int(random.gauss(center_x, cluster_std_dev))
-            y = int(random.gauss(center_y, cluster_std_dev))
-            # Clamp coordinates to be within bounds
-            locations.append((max(0, min(x, max_coord)), max(0, min(y, max_coord))))
+    Average route size
+        1 = Very short
+        2 = Short
+        3 = Medium
+        4 = Long
+        5 = Very long
+        6 = Ultra long
+        
+    Output: instance file XML<n>_<depotPos><custPos><demandType><avgRouteSize>_<instanceID>.vrp
 
-    elif distribution == 'RC': # Random-Clustered
-        clustered_customers = num_customers // 2
-        random_customers = num_customers - clustered_customers
-        # Generate clustered customers
-        for _ in range(clustered_customers):
-            center_x, center_y = random.choice(cluster_centers)
-            x = int(random.gauss(center_x, cluster_std_dev))
-            y = int(random.gauss(center_y, cluster_std_dev))
-            locations.append((max(0, min(x, max_coord)), max(0, min(y, max_coord))))
-        # Generate random customers
-        for _ in range(random_customers):
-            locations.append((random.randint(0, max_coord), random.randint(0, max_coord)))
-        random.shuffle(locations)
+    For more details about the generation process read:
+        Uchoa et al (2017). New benchmark instances for the Capacitated Vehicle Routing Problem. European Journal of Operational Research
+        Queiroga, Eduardo, et al. (2022). 10,000 optimal CVRP solutions for testing machine learning based heuristics.
+        """
+    print(help) 
+    exit(0)
 
-    return locations
 
-def generate_demands(num_customers, min_demand=1, max_demand=9):
-    """Generates random integer demands for each customer."""
-    return [random.randint(min_demand, max_demand) for _ in range(num_customers)]
+def distance(x,y):
+    return math.sqrt((x[0] - y[0])**2 + (x[1] - y[1])**2)
 
-def write_vrp_file(filename, name, capacity, locations, demands):
-    """Writes the instance to a file in the standard TSPLIB (.vrp) format."""
-    dimension = len(locations)
-    with open(filename, 'w') as f:
-        f.write(f"NAME: {name}\n")
-        f.write("TYPE: CVRP\n")
-        f.write(f"DIMENSION: {dimension}\n")
-        f.write("EDGE_WEIGHT_TYPE: EUC_2D\n")
-        f.write(f"CAPACITY: {capacity}\n")
-        f.write("NODE_COORD_SECTION\n")
-        for i, (x, y) in enumerate(locations):
-            f.write(f"{i + 1} {x} {y}\n")
-        f.write("DEMAND_SECTION\n")
-        f.write(f"1 0\n") # Depot has 0 demand
-        for i, demand in enumerate(demands):
-            f.write(f"{i + 2} {demand}\n")
-        f.write("DEPOT_SECTION\n")
-        f.write("1\n")
-        f.write("-1\n")
-        f.write("EOF\n")
-    print(f"✅ Successfully generated instance: {filename}")
+# constants
+maxCoord = 1000
+decay = 40
 
-def main():
-    parser = argparse.ArgumentParser(description="Generate CVRP instances mimicking CVRPLIB benchmarks.")
-    parser.add_argument("-n", type=int, default=100, help="Number of customers (e.g., 100).")
-    parser.add_argument("-c", type=int, default=100, help="Vehicle capacity.")
-    parser.add_argument("-t", type=str, choices=['R', 'C', 'RC'], default='C', help="Distribution type: R (Random), C (Clustered), RC (Random-Clustered).")
-    parser.add_argument("--depot", type=str, choices=['center', 'random'], default='center', help="Depot position.")
-    parser.add_argument("--seed", type=int, help="Random seed for reproducibility.")
-    parser.add_argument("-o", "--output", type=str, help="Output filename. If not provided, a name will be generated.")
+# read input argmuments
+n = int(sys.argv[1])
+rootPos = int(sys.argv[2])
+custPos = int(sys.argv[3])
+demandType = int(sys.argv[4])
+instanceID = int(sys.argv[6])
+randSeed = int(sys.argv[7]) # random seed for reproducibility
+if demandType > 7:
+    print("Demant type out of range!")
+    exit(0)
 
-    args = parser.parse_args()
+random.seed(randSeed)
 
-    if args.seed:
-        random.seed(args.seed)
+nSeeds = random.randint(2,6) 
 
-    customer_locations = generate_locations(args.n, distribution=args.t)
-    demands = generate_demands(args.n)
+In = {1:(3,5), 2:(5,8), 3:(8,12), 4:(12,16), 5:(16,25), 6:(25,50)}
+avgRouteSize = int(sys.argv[5])
+if avgRouteSize > 6:
+    print("Average route size out of range!")
+    exit(0)	
+r = random.uniform(In[avgRouteSize][0], In[avgRouteSize][1])
 
-    if args.depot == 'center':
-        depot_location = (50, 50)
-    else: # random
-        depot_location = (random.randint(0, 100), random.randint(0, 100))
+# change '02d' if you need more than two digits (e.g. with '03d' you can index from 001 to 999) 
+instanceName = 'XML'+str(n)+'_'+str(rootPos)+str(custPos)+str(demandType)+str(avgRouteSize)+'_'+ format(instanceID, '02d')
 
-    all_locations = [depot_location] + customer_locations
+pathToWrite = instanceName+'.vrp'
 
-    filename = args.output or f"{args.t}{args.n}_k_auto_C{args.c}.vrp"
+depot = (-1,-1) # depot position
+S = set() # set of coordinates for the customers
 
-    write_vrp_file(filename, filename.replace('.vrp', ''), args.c, all_locations, demands)
+x_,y_ = (-1,-1)
+#Root positioning
+if rootPos == 1:
+    x_ = random.randint(0,maxCoord)
+    y_ = random.randint(0,maxCoord)
+elif rootPos == 2:
+    x_ = y_ = int(maxCoord/2.0)
+elif rootPos == 3:
+    x_ = y_ = 0
+else:
+    print("Depot Positioning out of range!")
+    exit(0)
+depot = (x_,y_)
 
-if __name__ == "__main__":
-    main()
+#Customer positioning
+nRandCust = -1
+if custPos == 3:
+    nRandCust = int(n/2.0)
+elif custPos == 2:
+    nRandCust = 0
+elif custPos == 1:
+    nRandCust = n
+    nSeeds = 0
+else:
+    print("Costumer Positioning out of range!")
+    exit(0)
+
+nClustCust = n - nRandCust
+
+#Generating random customers
+for i in range(1, nRandCust+1):
+    x_ = random.randint(0,maxCoord)
+    y_ = random.randint(0,maxCoord)
+    while (x_,y_) in S or (x_,y_) == depot:
+        x_ = random.randint(0,maxCoord)
+        y_ = random.randint(0,maxCoord)
+    S.add((x_,y_))
+
+nS = nRandCust
+
+seeds = []
+# Generation of the clustered customers
+if nClustCust > 0:
+    if nClustCust < nSeeds:
+        print("Too many seeds!")
+        exit(0)
+    
+    #Generate the seeds
+    for i in range(nSeeds):
+        x_ = random.randint(0,maxCoord)
+        y_ = random.randint(0,maxCoord)
+        while (x_,y_) in S or (x_,y_) == depot:
+            x_ = random.randint(0,maxCoord)
+            y_ = random.randint(0,maxCoord)
+        S.add((x_,y_))
+        seeds.append((x_,y_))
+    nS = nS + nSeeds
+    
+    # Determine the seed with maximum sum of weights (w.r.t. all seeds)
+    maxWeight = 0.0
+    for i,j in seeds:
+        w_ij = 0.0
+        for i_,j_ in seeds:
+            w_ij += 2**(-distance((i,j), (i_,j_)) / decay)
+        if w_ij > maxWeight:
+            maxWeight = w_ij
+
+    norm_factor = 1.0/maxWeight
+
+    # Generate the remaining customers using Accept-reject method
+    while nS < n:
+        x_ = random.randint(0,maxCoord)
+        y_ = random.randint(0,maxCoord)
+        while (x_,y_) in S or (x_,y_) == depot:
+            x_ = random.randint(0,maxCoord)
+            y_ = random.randint(0,maxCoord)
+        
+        weight = 0.0
+        for i_,j_ in seeds:
+            weight += 2**(-distance((x_,y_), (i_,j_)) / decay)
+        weight *= norm_factor
+        rand = random.uniform(0,1)
+
+        if rand <= weight: # Will we accept the customer?
+            S.add((x_,y_))
+            nS = nS + 1
+
+V = [depot] + list(S) # set of vertices (from now on, the ids are defined)
+
+# Demands
+demandMinValues = [1,1,5,1,50,1,51,50,1]
+demandMaxValues = [1,10,10,100,100,50,100,100,10]
+demandMin = demandMinValues[demandType-1]
+demandMax = demandMaxValues[demandType-1]
+demandMinEvenQuadrant = 51
+demandMaxEvenQuadrant = 100
+demandMinLarge = 50
+demandMaxLarge = 100
+largePerRoute = 1.5
+demandMinSmall = 1
+demandMaxSmall = 10
+
+D = [] # demands
+sumDemands = 0
+maxDemand = 0
+
+for i in range(2,n + 2):
+    j = int((demandMax - demandMin + 1) * random.uniform(0,1) + demandMin)
+    if demandType == 6:
+        if (V[i - 1][0] < maxCoord/2.0 and V[i - 1][1] < maxCoord/2.0) or (V[i - 1][0] >= maxCoord/2.0 and V[i - 1][1] >= maxCoord/2.0):
+            j = int((demandMaxEvenQuadrant - demandMinEvenQuadrant + 1) * random.uniform(0,1) + demandMinEvenQuadrant)
+    if demandType == 7:
+        if i < (n / r) * largePerRoute:
+            j = int((demandMaxLarge - demandMinLarge + 1) * random.uniform(0,1) + demandMinLarge)
+        else:
+            j = int((demandMaxSmall - demandMinSmall + 1) * random.uniform(0,1) + demandMinSmall)
+    D.append(j)
+    if j > maxDemand:
+        maxDemand = j
+    sumDemands = sumDemands + j
+
+# Generate capacity
+capacity = -1
+if sumDemands == n:
+    capacity = math.floor(r)
+else:
+    capacity = max(maxDemand, math.ceil(r * sumDemands / n))
+
+k = math.ceil(sumDemands/float(capacity))
+
+f = open(instanceName+'.vrp', 'w')
+f.write('NAME : ' + instanceName + '\n')
+f.write('COMMENT : Generated as the XML100 dataset from the CVRPLIB\n')
+f.write('TYPE : CVRP\n')
+f.write('DIMENSION : ' + str(n+1) + '\n')
+f.write('EDGE_WEIGHT_TYPE : EUC_2D\n')
+f.write('CAPACITY : ' + str(int(capacity)) + '\n')
+f.write('NODE_COORD_SECTION\n')
+
+for i,v in enumerate(V):
+    f.write('{:<4}'.format(i+1)+' '+'{:<4}'.format(v[0])+' '+'{:<4}'.format(v[1])+'\n')
+
+f.write('DEMAND_SECTION\n')
+if demandType != 6:
+    random.shuffle(D)
+D = [0] + D
+for i,d in enumerate(V):
+    f.write('{:<4}'.format(i+1)+' '+'{:<4}'.format(D[i])+'\n')
+
+f.write('DEPOT_SECTION\n1\n-1\nEOF\n')
+
+f.close()
+
+# x = [v[0] for v in V]
+# y = [v[1] for v in V]
+# x_s = [v[0] for v in seeds]
+# y_s = [v[1] for v in seeds]
+# plt.figure(figsize=(20, 20), dpi=80)
+# plt.scatter(x, y, marker='o', color='blue',edgecolor='blue', s=40)
+# plt.scatter(x_s, y_s, marker='o', color='magenta',edgecolor='magenta', s=40)
+# plt.scatter([x[0]], [y[0]], marker='s', edgecolor='black', color='yellow', s=200)
+# plt.xticks([]) # Turn off x labels
+# plt.yticks([]) # Turn off y labels
+# plt.savefig(instanceName+'.png')
+# plt.close()
