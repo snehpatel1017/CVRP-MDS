@@ -46,11 +46,13 @@ public:
     {
         toRound = 1;   // DEFAULT is round
         nThreads = 20; // DEFAULT is 20 OMP threads
+        timeLimit = 1.0;
     }
     ~Params() {}
 
     bool toRound;
     short nThreads;
+    double timeLimit;
 };
 
 class Edge
@@ -401,6 +403,7 @@ postprocess_tsp_approx(const VRP &vrp, std::vector<std::vector<node_t>> &solRout
 void tsp_2opt(const VRP &vrp, std::vector<node_t> &cities, std::vector<node_t> &tour, unsigned ncities)
 {
     unsigned improve = 0;
+    const double EPSILON = 1e-9;
 
     while (improve < 2)
     {
@@ -440,7 +443,7 @@ void tsp_2opt(const VRP &vrp, std::vector<node_t> &cities, std::vector<node_t> &
                 else
                     new_distance += vrp.get_dist(cities[i], cities[k + 1]);
 
-                if (new_distance < best_distance)
+                if (new_distance < best_distance - EPSILON)
                 {
                     improve = 0;
                     int left_ptr = i, right_ptr = k;
@@ -448,7 +451,13 @@ void tsp_2opt(const VRP &vrp, std::vector<node_t> &cities, std::vector<node_t> &
                     {
                         swap(cities[left_ptr++], cities[right_ptr--]);
                     }
-                    best_distance = new_distance;
+
+                    best_distance = vrp.get_dist(DEPOT, cities[0]);
+                    for (unsigned jj = 1; jj < ncities; ++jj)
+                    {
+                        best_distance += vrp.get_dist(cities[jj - 1], cities[jj]);
+                    }
+                    best_distance += vrp.get_dist(DEPOT, cities[ncities - 1]);
                 }
             }
         }
@@ -722,6 +731,8 @@ int main(int argc, char *argv[])
             vrp.params.toRound = atoi(argv[ii + 1]);
         else if (std::string(argv[ii]) == "-nthreads")
             vrp.params.nThreads = atoi(argv[ii + 1]);
+        else if (std::string(argv[ii]) == "-time")
+            vrp.params.timeLimit = atoi(argv[ii + 1]);
         else
         {
             std::cerr << "INVALID Arguments!" << '\n';
@@ -784,9 +795,20 @@ int main(int argc, char *argv[])
     std::chrono::high_resolution_clock::time_point start2 = std::chrono::high_resolution_clock::now();
     std::vector<double> Middle_Part_Times(4, 0);
 
-#pragma omp parallel for shared(minCost, minRoute) num_threads(PARLIMIT)
-    for (int i = 0; i < 100000; i += PARLIMIT)
+    // #pragma omp parallel for shared(minCost, minRoute) num_threads(PARLIMIT)
+    int MAXITR = 100000;
+    int i = 0;
+    auto loopStart = std::chrono::high_resolution_clock::now();
+    while (i < MAXITR)
     {
+        i++;
+        auto now = std::chrono::high_resolution_clock::now();
+        double elapsed_sec =
+            std::chrono::duration_cast<std::chrono::duration<double>>(now - loopStart).count();
+
+        if (elapsed_sec >= vrp.params.timeLimit)
+            break;
+
         std::chrono::high_resolution_clock::time_point st = std::chrono::high_resolution_clock::now();
         for (auto &list : mstCopy)
         {

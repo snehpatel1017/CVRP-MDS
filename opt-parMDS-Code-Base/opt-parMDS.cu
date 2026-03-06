@@ -236,7 +236,7 @@ void printAdjList(const std::vector<std::vector<Edge>> &graph)
 }
 
 // DFS Recursive.
-void ShortCircutTour(std::vector<std::vector<int>> &g, std::vector<bool> &visited, node_t u, std::vector<node_t> &out, int *ind)
+void ShortCircuitTour(std::vector<std::vector<int>> &g, std::vector<bool> &visited, node_t u, std::vector<node_t> &out, int *ind)
 {
     visited[u] = true;
     DEBUG std::cout << u << ' ';
@@ -248,7 +248,7 @@ void ShortCircutTour(std::vector<std::vector<int>> &g, std::vector<bool> &visite
         node_t v = e;
         if (!visited[v])
         {
-            ShortCircutTour(g, visited, v, out, ind);
+            ShortCircuitTour(g, visited, v, out, ind);
         }
     }
 }
@@ -1123,7 +1123,7 @@ int main(int argc, char *argv[])
         visited[0] = true;
         int ind = 0;
 
-        ShortCircutTour(mstCopy, visited, 0, singleRoute, &ind);
+        ShortCircuitTour(mstCopy, visited, 0, singleRoute, &ind);
         DEBUG std::cout << '\n';
 
         auto aRoutes = convertToVrpRoutes(vrp, singleRoute);

@@ -44,11 +44,13 @@ public:
   {
     toRound = 1;   // DEFAULT is round
     nThreads = 20; // DEFAULT is 20 OMP threads
+    timeLimit = 1.0;
   }
   ~Params() {}
 
   bool toRound;
   short nThreads;
+  double timeLimit;
 };
 
 class Edge
@@ -263,6 +265,7 @@ PrimsAlgo(const VRP &vrp, std::vector<std::vector<Edge>> &graph)
 {
   auto N = graph.size();
   const node_t INIT = -1;
+  //! std::cout<< "N "<< N << '\n';
 
   std::vector<weight_t> key(N, INT_MAX);
   std::vector<weight_t> toEdges(N, -1);
@@ -771,7 +774,7 @@ int main(int argc, char *argv[])
   if (argc < 2)
   {
     std::cout << "parMDS version 1.1" << '\n';
-    std::cout << "Usage: " << argv[0] << " toy.vrp [-nthreads <n> DEFAULT is 20] [-round 0 or 1 DEFAULT:1]" << '\n';
+    std::cout << "Usage: " << argv[0] << " toy.vrp [-nthreads <n> DEFAULT is 20] [-round 0 or 1 DEFAULT:1] [-time <n> DEFAULT is 1.0]" << '\n';
     exit(1);
   }
 
@@ -781,10 +784,13 @@ int main(int argc, char *argv[])
       vrp.params.toRound = atoi(argv[ii + 1]);
     else if (std::string(argv[ii]) == "-nthreads")
       vrp.params.nThreads = atoi(argv[ii + 1]);
+    else if (std::string(argv[ii]) == "-time")
+      vrp.params.timeLimit = atoi(argv[ii + 1]);
     else
     {
-      std::cerr << "INVALID Arguments!" << '\n';
-      std::cerr << "Usage:" << argv[0] << " toy.vrp -nthreads 20 -round 1" << '\n';
+      std::cerr << "INVALID Arguments! : ";
+      std::cerr << argv[ii] << "\n";
+      std::cerr << "Usage:" << argv[0] << " toy.vrp -nthreads 20 -round 1 -time 1" << '\n';
       exit(1);
     }
   }
@@ -853,9 +859,16 @@ int main(int argc, char *argv[])
   //~ short PARLIMIT = ((argc == 3) ? stoi(argv[2]) : 20);  //Default stride is 20 if arg 3 is not provided!
   short PARLIMIT = vrp.params.nThreads;
 
-#pragma omp parallel for shared(minCost, minRoute) num_threads(PARLIMIT)
-  for (int i = 0; i < 100000; i += PARLIMIT)
-  { // 10^5 is chosen empirically beyond which the solution quality improves very merge amount!
+  auto loopStart = std::chrono::high_resolution_clock::now();
+
+  while (true)
+  {
+    auto now = std::chrono::high_resolution_clock::now();
+    double elapsed_sec =
+        std::chrono::duration_cast<std::chrono::duration<double>>(now - loopStart).count();
+
+    if (elapsed_sec >= vrp.params.timeLimit)
+      break;
     for (auto &list : mstCopy)
     {                                                                             //& indicates the exiting mst list will be modified and subsequent Shortcircuit computation
       std::shuffle(list.begin(), list.end(), std::default_random_engine(rand())); // seed | i | rand()  // DEFAULT is rand
@@ -922,7 +935,7 @@ int main(int argc, char *argv[])
     std::cerr << " INVALID" << std::endl;
 
   // PRINT ANS
-  printOutput(vrp, postRoutes);
+  // printOutput(vrp, postRoutes);
 
   return 0;
 }

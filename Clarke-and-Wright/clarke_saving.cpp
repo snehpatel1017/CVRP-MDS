@@ -10,6 +10,11 @@
 #include <chrono>  // For timing
 #include <omp.h>   // For OpenMP
 #include <cstring>
+#include "InstanceCVRPLIB.h"
+#include "commandline.h"
+#include "LocalSearch.h"
+#include "Individual.h"
+#include "Params.h"
 
 // Type definitions consistent with the provided file
 unsigned DEBUGCODE = 0;
@@ -64,19 +69,19 @@ struct Saving
         return false;
     }
 };
-class Params
-{
-public:
-    Params()
-    {
-        toRound = 1;   // DEFAULT is round
-        nThreads = 20; // DEFAULT is 20 OMP threads
-    }
-    ~Params() {}
+// class Params
+// {
+// public:
+//     Params()
+//     {
+//         toRound = 1;   // DEFAULT is round
+//         nThreads = 20; // DEFAULT is 20 OMP threads
+//     }
+//     ~Params() {}
 
-    bool toRound;
-    short nThreads;
-};
+//     bool toRound;
+//     short nThreads;
+// };
 
 class Edge
 {
@@ -253,127 +258,145 @@ bool verify_sol(const VRP &vrp, vector<vector<node_t>> final_routes, unsigned ca
 }
 
 /**
- * @brief Implements the massively parallel Clarke and Wright Savings algorithm.
+ * @brief Implements the sequential Clarke and Wright Savings algorithm.
  * @param vrp The VRP instance.
  * @return A vector of routes forming a complete solution.
  */
-std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
+std::vector<std::vector<node_t>> clarke_and_wright(const VRP &vrp)
 {
-    // --- 1. Calculate Savings (Extremely Parallel Part) ---
-    std::vector<Saving> savings_list;
-    // Reserve memory to avoid reallocations within the parallel block
-    savings_list.reserve((vrp.size * (vrp.size - 1)) / 2);
+    // 1. Calculate Savings
+    // S_ij = d(0,i) + d(0,j) - d(i,j)
+    std::vector<Saving> savings;
+    size_t n = vrp.getSize();
 
-#pragma omp parallel for collapse(2)
-    for (node_t i = 1; i < vrp.size; ++i)
+    // Reserve memory to avoid reallocations (approx N^2/2)
+    if (n > 1)
     {
-        for (node_t j = i + 1; j < vrp.size; ++j)
+        savings.reserve((n * (n - 1)) / 2);
+    }
+
+    for (node_t i = 1; i < (node_t)n; ++i)
+    {
+        for (node_t j = i + 1; j < (node_t)n; ++j)
         {
-            weight_t saving_value = vrp.dist_to_depot[i] + vrp.dist_to_depot[j] - vrp.get_dist(i, j);
-            if (saving_value > 0)
-            {
-#pragma omp critical
-                savings_list.push_back({i, j, saving_value});
-            }
+            weight_t dist_ij = vrp.get_dist(i, j);
+            weight_t save_val = vrp.dist_to_depot[i] + vrp.dist_to_depot[j] - dist_ij;
+            savings.push_back({i, j, save_val});
         }
     }
 
-    // --- 2. Sort Savings (Sequential but fast) ---
-    std::sort(savings_list.begin(), savings_list.end());
-    std::vector<demand_t> route_demands(vrp.size);
-    std::vector<node_t> customer_route_map(vrp.size);
-    std::vector<node_t> route_head(vrp.size);
-    std::vector<node_t> route_tail(vrp.size);
+    // 2. Sort Savings
+    std::sort(savings.begin(), savings.end());
 
-    // Doubly-linked list representation of routes
-    std::vector<node_t> next_customer(vrp.size, DEPOT);
-    std::vector<node_t> prev_customer(vrp.size, DEPOT);
+    // 3. Initialize Routes
+    // Initially, each customer is in their own route: [i]
+    // We use 'route_index' to track which route a node currently belongs to.
+    // 'routes' stores the actual sequence of nodes.
+    std::vector<std::vector<node_t>> routes(n);
+    std::vector<demand_t> route_demands(n);
+    std::vector<int> node_to_route_id(n);
 
-    std::vector<node_t> temporary(vrp.size, -1);
-
-    for (node_t i = 1; i < vrp.size; ++i)
+    for (node_t i = 1; i < (node_t)n; ++i)
     {
+        routes[i].push_back(i);
         route_demands[i] = vrp.node[i].demand;
-        customer_route_map[i] = i;
-        route_head[i] = i;
-        route_tail[i] = i;
+        node_to_route_id[i] = i;
     }
 
-    // --- 4. Merge Routes Greedily (with corrected O(1) merges) ---
-    long long id = 0;
-    for (const auto &saving : savings_list)
+    // 4. Process Savings
+    for (const auto &s : savings)
     {
-        // std::cout << id++ << "\n";
-        node_t i = saving.i;
-        node_t j = saving.j;
+        node_t i = s.i;
+        node_t j = s.j;
 
-        node_t route_id_i = customer_route_map[i];
-        node_t route_id_j = customer_route_map[j];
+        int r_i = node_to_route_id[i];
+        int r_j = node_to_route_id[j];
 
-        if (route_id_i != route_id_j)
+        // If they are already in the same route, skip to avoid cycles
+        if (r_i == r_j)
+            continue;
+
+        // Check Capacity Constraint
+        if (route_demands[r_i] + route_demands[r_j] > vrp.getCapacity())
+            continue;
+
+        // Check topological validity for merging:
+        // Nodes i and j must be adjacent to the depot (i.e., at the start or end of their routes).
+
+        // Check position of i in route r_i
+        bool i_is_start = (routes[r_i].front() == i);
+        bool i_is_end = (routes[r_i].back() == i);
+
+        // If i is internal to its route, it cannot connect to j
+        if (!i_is_start && !i_is_end)
+            continue;
+
+        // Check position of j in route r_j
+        bool j_is_start = (routes[r_j].front() == j);
+        bool j_is_end = (routes[r_j].back() == j);
+
+        // If j is internal to its route, it cannot connect to i
+        if (!j_is_start && !j_is_end)
+            continue;
+
+        // Perform Merge
+        // We will always merge r_j INTO r_i and clear r_j.
+
+        // Case 1: i is at End, j is at Start ( ... i ) + ( j ... ) -> Normal append
+        if (i_is_end && j_is_start)
         {
-            if (route_demands[route_id_i] + route_demands[route_id_j] <= vrp.capacity)
-            {
-                node_t head_i = route_head[route_id_i];
-                node_t tail_i = route_tail[route_id_i];
-                node_t head_j = route_head[route_id_j];
-                node_t tail_j = route_tail[route_id_j];
-
-                bool merged = false;
-                int reverse = -1;
-
-                // Case 1: Tail of route i connects to Head of route j [...i] -> [j...]
-                if (tail_i == i && head_j == j)
-                {
-                    next_customer[i] = j;
-                    prev_customer[j] = i;
-                    route_tail[route_id_i] = tail_j; // New tail is old tail of j
-                    merged = true;
-                }
-                // Case 2: Tail of route j connects to Head of route i [...j] -> [i...]
-                else if (tail_j == j && head_i == i)
-                {
-                    next_customer[j] = i;
-                    prev_customer[i] = j;
-                    route_head[route_id_i] = head_j; // New head is old head of j
-                    merged = true;
-                }
-                if (merged)
-                {
-                    route_demands[route_id_i] += route_demands[route_id_j];
-                    customer_route_map[head_j] = route_id_i;
-                    customer_route_map[tail_j] = route_id_i;
-                    route_demands[route_id_j] = 0;
-                    route_head[route_id_j] = DEPOT;
-                    route_tail[route_id_j] = DEPOT;
-                }
-            }
+            routes[r_i].insert(routes[r_i].end(), routes[r_j].begin(), routes[r_j].end());
         }
+        // Case 2: i is at Start, j is at End ( i ... ) + ( ... j ) -> Prepend r_j to r_i (or append r_i to r_j, but we merge into r_i)
+        // Logic: ( ... j ) + ( i ... )
+        else if (i_is_start && j_is_end)
+        {
+            routes[r_i].insert(routes[r_i].begin(), routes[r_j].begin(), routes[r_j].end());
+        }
+        // Case 3: i is at End, j is at End ( ... i ) + ( ... j ) -> Reverse r_j then append
+        else if (i_is_end && j_is_end)
+        {
+            std::reverse(routes[r_j].begin(), routes[r_j].end());
+            routes[r_i].insert(routes[r_i].end(), routes[r_j].begin(), routes[r_j].end());
+        }
+        // Case 4: i is at Start, j is at Start ( i ... ) + ( j ... ) -> Reverse r_i then append r_j (or vice versa)
+        else if (i_is_start && j_is_start)
+        {
+            std::reverse(routes[r_i].begin(), routes[r_i].end());
+            routes[r_i].insert(routes[r_i].end(), routes[r_j].begin(), routes[r_j].end());
+        }
+
+        // Update accounting
+        route_demands[r_i] += route_demands[r_j];
+
+        // Update route pointers for all nodes that were in r_j
+        // (Note: we use a reference to the now-moved vector before clearing it,
+        // though strictly we iterate the nodes we just moved inside r_i,
+        // it's safer/easier to iterate the old vector if not cleared yet or just check indices)
+        // However, since we inserted r_j's content into r_i, we can't easily distinguish them in r_i without offsets.
+        // It is safer to loop through the original r_j indices.
+        // But since we just moved the data, let's scan the nodes in the old r_j location in the `routes` array
+        // *before* we clear it, to update their IDs.
+        for (node_t node : routes[r_j])
+        {
+            node_to_route_id[node] = r_i;
+        }
+
+        // Clear the old route
+        routes[r_j].clear();
+        route_demands[r_j] = 0;
     }
 
-    // --- 5. Finalize and Reconstruct Routes ---
+    // 5. Collect Final Routes
     std::vector<std::vector<node_t>> final_routes;
-    std::vector<bool> visited_routes(vrp.size, false);
-
-    for (node_t i = 1; i < vrp.size; ++i)
+    for (size_t i = 1; i < n; ++i)
     {
-        node_t route_id = customer_route_map[i];
-        if (route_id != DEPOT && !visited_routes[route_id])
+        if (!routes[i].empty())
         {
-            visited_routes[route_id] = true;
-            std::vector<node_t> current_route;
-            node_t current_node = route_head[route_id];
-            while (current_node != DEPOT)
-            {
-                current_route.push_back(current_node);
-                current_node = next_customer[current_node];
-            }
-            if (!current_route.empty())
-            {
-                final_routes.push_back(current_route);
-            }
+            final_routes.push_back(routes[i]);
         }
     }
+
     return final_routes;
 }
 
@@ -608,40 +631,66 @@ int main(int argc, char *argv[])
         std::cerr << "Usage: " << argv[0] << " <filename.vrp> [num_threads]" << std::endl;
         return 1;
     }
-    if (argc > 2)
-    {
-        omp_set_num_threads(std::stoi(argv[2]));
-    }
+    std::cout << argc % 2 << " sahi to he\n";
+    CommandLine commandline(argc, argv);
+    if (commandline.verbose)
+        std::cout << "----- READING INSTANCE: " << commandline.pathInstance << std::endl;
+
+    InstanceCVRPLIB cvrp(commandline.pathInstance, commandline.isRoundingInteger);
+    Params params(cvrp.x_coords, cvrp.y_coords, cvrp.service_time, cvrp.demands,
+                  cvrp.vehicleCapacity, cvrp.durationLimit, commandline.nbVeh, cvrp.isDurationConstraint, commandline.verbose, commandline.ap);
 
     VRP vrp;
     vrp.read(argv[1]);
 
     auto start_time = std::chrono::high_resolution_clock::now();
-    std::vector<std::vector<node_t>> routes = parallel_savings_algorithm(vrp);
+    std::vector<std::vector<node_t>> routes = clarke_and_wright(vrp);
     auto end_time = std::chrono::high_resolution_clock::now();
 
     std::chrono::duration<double> elapsed = end_time - start_time;
+
     weight_t total_cost = calCost(vrp, routes);
-    routes = postProcessIt(vrp, routes, total_cost);
-    total_cost = calCost(vrp, routes);
-    bool is_valid = verify_sol(vrp, routes, vrp.getCapacity());
-    for (auto &route : routes)
-    {
-        std::cout << "Route: 0 ";
-        for (auto &node : route)
-        {
-            std::cout << node << " ";
-        }
-        std::cout << "0\n";
-    }
 
     std::cout << "--- Parallel Clarke & Wright Savings Algorithm ---" << std::endl;
     std::cout << "Problem File: " << argv[1] << std::endl;
-    std::cout << "Threads Used: " << omp_get_max_threads() << std::endl;
     std::cout << "--------------------------------------------------" << std::endl;
+    std::cout << "Before preprosess Solution Cost: " << total_cost << std::endl;
+
+    std::string routeFile = argv[1];
+    size_t pos = routeFile.find_last_of('.');
+    if (pos != std::string::npos)
+    {
+        routeFile = routeFile.substr(0, pos) + ".sol";
+    }
+
+    auto local_search_start = std::chrono::high_resolution_clock::now();
+    routes = postProcessIt(vrp, routes, total_cost);
+    total_cost = calCost(vrp, routes);
+
+    try
+    {
+        Individual indiv(params, routes);
+        LocalSearch localSearch(params);
+        localSearch.run(indiv, params.penaltyCapacity, params.penaltyDuration);
+        routes = indiv.chromR;
+    }
+    catch (const std::string &e)
+    {
+        std::cerr << "HGS Exception: " << e << std::endl;
+    }
+    auto local_search_end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> local_search_time = local_search_end - local_search_start;
+
+    bool is_valid = verify_sol(vrp, routes, vrp.getCapacity());
+    total_cost = calCost(vrp, routes);
+
+    // std::cout << "Threads Used: " << omp_get_max_threads() << std::endl;
     std::cout << std::fixed << std::setprecision(2);
     std::cout << "Total Solution Cost: " << total_cost << std::endl;
-    std::cout << "Total Time Taken:    " << elapsed.count() << " seconds" << std::endl;
+    std::cout << "Number of Routes:   " << routes.size() << std::endl;
+    std::cout << "Clarke and Wright Time : " << elapsed.count() << std::endl;
+    std::cout << "Local Search Time: " << local_search_time.count() << " seconds" << std::endl;
+    std::cout << "Total Time Taken:    " << elapsed.count() + local_search_time.count() << " seconds" << std::endl;
     std::cout << "Solution Validity:   " << (is_valid ? "VALID" : "INVALID") << std::endl;
     std::cout << "--------------------------------------------------" << std::endl;
 

@@ -1,0 +1,18 @@
+Number of Customers: 150
+Time for first iteration: 0.00278555 seconds
+No more positive savings found. Halting.
+28
+loop ended
+memory copied back to host
+routes generated
+--- Parallel Clarke & Wright Savings Algorithm ---
+Problem File: ../New_CW/inputs/CMT4.vrp
+--------------------------------------------------
+Before preprosess Solution Cost: 1087.00
+Total Solution Cost: 1072.00
+Number of Routes:   12
+Parrallel Clarke and Wright Time : 2.05
+Local Search Time: 0.00 seconds
+Total Time Taken:    2.06 seconds
+Solution Validity:   VALID
+--------------------------------------------------
