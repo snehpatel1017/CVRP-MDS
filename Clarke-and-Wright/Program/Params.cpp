@@ -14,7 +14,8 @@ Params::Params(
 	int nbVeh,
 	bool isDurationConstraint,
 	bool verbose,
-	const AlgorithmParameters &ap)
+	const AlgorithmParameters &ap,
+	const std::vector<std::set<int>> &setCorrelatedVertices)
 	: ap(ap), isDurationConstraint(isDurationConstraint), nbVehicles(nbVeh), durationLimit(durationLimit),
 	  vehicleCapacity(vehicleCapacity), verbose(verbose)
 {
@@ -72,37 +73,20 @@ Params::Params(
 			std::cout << "----- FLEET SIZE SPECIFIED: SET TO " << nbVehicles << " VEHICLES" << std::endl;
 	}
 
-	// Calculation of the maximum distance
-	maxDist = 0.;
-	for (int i = 0; i <= nbClients; i++)
-		for (int j = 0; j <= nbClients; j++)
-		{
-			double dist = getDist(i, j);
-			if (dist > maxDist)
-			{
-				maxDist = dist;
-			}
-		}
+	// // Calculation of the maximum distance
+	// maxDist = 0.;
+	// for (int i = 0; i <= nbClients; i++)
+	// 	for (int j = 0; j <= nbClients; j++)
+	// 	{
+	// 		double dist = getDist(i, j);
+	// 		if (dist > maxDist)
+	// 		{
+	// 			maxDist = dist;
+	// 		}
+	// 	}
 
 	// Calculation of the correlated vertices for each customer (for the granular restriction)
 	correlatedVertices = std::vector<std::vector<int>>(nbClients + 1);
-	std::vector<std::set<int>> setCorrelatedVertices = std::vector<std::set<int>>(nbClients + 1);
-	std::vector<std::pair<double, int>> orderProximity;
-	for (int i = 1; i <= nbClients; i++)
-	{
-		orderProximity.clear();
-		for (int j = 1; j <= nbClients; j++)
-			if (i != j)
-				orderProximity.emplace_back(getDist(i, j), j);
-		std::sort(orderProximity.begin(), orderProximity.end());
-
-		for (int j = 0; j < std::min<int>(ap.nbGranular, nbClients - 1); j++)
-		{
-			// If i is correlated with j, then j should be correlated with i
-			setCorrelatedVertices[i].insert(orderProximity[j].second);
-			setCorrelatedVertices[orderProximity[j].second].insert(i);
-		}
-	}
 
 	// Filling the vector of correlated vertices
 	for (int i = 1; i <= nbClients; i++)
@@ -110,9 +94,9 @@ Params::Params(
 			correlatedVertices[i].push_back(x);
 
 	// Safeguards to avoid possible numerical instability in case of instances containing arbitrarily small or large numerical values
-	if (maxDist < 0.1 || maxDist > 100000)
-		throw std::string(
-			"The distances are of very small or large scale. This could impact numerical stability. Please rescale the dataset and run again.");
+	// if (maxDist < 0.1 || maxDist > 100000)
+	// 	throw std::string(
+	// 		"The distances are of very small or large scale. This could impact numerical stability. Please rescale the dataset and run again.");
 	if (maxDemand < 0.1 || maxDemand > 100000)
 		throw std::string(
 			"The demand quantities are of very small or large scale. This could impact numerical stability. Please rescale the dataset and run again.");

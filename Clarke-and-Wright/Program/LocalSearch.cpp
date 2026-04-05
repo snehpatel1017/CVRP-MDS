@@ -20,12 +20,13 @@ void LocalSearch::run(Individual &indiv, double penaltyCapacityLS, double penalt
 			searchCompleted = true;
 
 		/* CLASSICAL ROUTE IMPROVEMENT (RI) MOVES SUBJECT TO A PROXIMITY RESTRICTION */
+
 		for (int posU = 0; posU < params.nbClients; posU++)
 		{
 			nodeU = &clients[orderNodes[posU]];
 			int lastTestRINodeU = nodeU->whenLastTestedRI;
 			nodeU->whenLastTestedRI = nbMoves;
-			/*
+
 			for (int posV = 0; posV < (int)params.correlatedVertices[nodeU->cour].size(); posV++)
 			{
 
@@ -72,7 +73,6 @@ void LocalSearch::run(Individual &indiv, double penaltyCapacityLS, double penalt
 					}
 				}
 			}
-			*/
 
 			/* MOVES INVOLVING AN EMPTY ROUTE -- NOT TESTED IN THE FIRST LOOP TO AVOID INCREASING TOO MUCH THE FLEET SIZE */
 			if (loopID > 0 && !emptyRoutes.empty())

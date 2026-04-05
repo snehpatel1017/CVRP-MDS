@@ -12,11 +12,13 @@
 #include <iomanip> // For std::setprecision
 #include <chrono>  // For timing
 #include <omp.h>
-#include <stdio.h>
-#include <utility>
+
 // CUDA specific headers
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
+#include <cooperative_groups.h> // Required for grid.sync()
+
+namespace cg = cooperative_groups;
 
 using point_t = double;
 using weight_t = double;
@@ -44,7 +46,6 @@ public:
     std::vector<Point> node;
     std::vector<weight_t> dist_to_depot;
     static bool isRound;
-    static bool verbose;
 
     VRP() : size(0), capacity(0) {}
 
@@ -62,7 +63,6 @@ public:
 };
 
 bool VRP::isRound = false;
-bool VRP::verbose = false;
 
 void VRP::read(const std::string &filename)
 {
@@ -72,7 +72,6 @@ void VRP::read(const std::string &filename)
         std::cerr << "Error: Could not open file " << filename << std::endl;
         exit(1);
     }
-
     std::string line;
     while (getline(in, line) && line.find("DIMENSION") == std::string::npos)
         ;
@@ -109,10 +108,12 @@ weight_t VRP::get_dist(node_t i, node_t j) const
 {
     double dx = node[i].x - node[j].x;
     double dy = node[i].y - node[j].y;
+
     double dist = sqrt(dx * dx + dy * dy);
-    if (isRound)
+    if (VRP::isRound)
         return std::round(dist);
-    return dist;
+    else
+        return dist;
 }
 
 weight_t calCost(const VRP &vrp, const std::vector<std::vector<node_t>> &routes)
@@ -192,7 +193,17 @@ __device__ double device_euclidean_dist(const Point &a, const Point &b)
     return sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y));
 }
 
+__device__ int get_pair_mathematical(long long global_index, int n)
+{
+    double n_double = (double)(n);
+    int current_i = (int)(n_double - 2.0 -
+                          floor(sqrt(-8.0 * global_index + 4.0 * n_double * (n_double - 1.0) - 7.0) / 2.0 - 0.5));
+
+    return current_i;
+}
+
 __device__ volatile unsigned int global_counter = 0;
+__device__ volatile unsigned int global_counter_reverse_list = 0;
 // __device__ volatile unsigned long long int global_counter_2 = 0;
 
 __global__ void find_buddy_per_node(
@@ -217,7 +228,6 @@ __global__ void find_buddy_per_node(
         int favourite = -1;
         double best_saving = 0.0;
         demand_t final_cap = DBL_MAX;
-        node_t fav_j = -1;
         node_t route_id_i = customer_route_map[i];
         demand_t my_demands = route_demands[route_id_i];
         node_t front_i = route_head[route_id_i];
@@ -230,50 +240,39 @@ __global__ void find_buddy_per_node(
                 continue;
 
             node_t route_id_j = customer_route_map[j];
-            node_t front_j = route_head[route_id_j];
-            node_t back_j = route_tail[route_id_j];
             demand_t j_demand = route_demands[route_id_j];
             if (my_demands + j_demand > capacity)
                 continue;
+            node_t front_j = route_head[route_id_j];
+            node_t back_j = route_tail[route_id_j];
             if (front_j == DEPOT || back_j == DEPOT)
                 continue;
 
             double saving_1 = dist_to_depot[back_i] + dist_to_depot[front_j] - device_euclidean_dist(nodes[back_i], nodes[front_j]);
             double saving_2 = dist_to_depot[back_j] + dist_to_depot[front_i] - device_euclidean_dist(nodes[back_j], nodes[front_i]);
-            if (best_saving < saving_1)
+            if (max(saving_1, saving_2) <= 0)
+                continue;
+            if (best_saving < max(saving_1, saving_2))
             {
-                best_saving = saving_1;
+                best_saving = max(saving_1, saving_2);
                 favourite = j;
-                fav_j = route_id_j;
                 final_cap = my_demands + j_demand;
             }
-            if (best_saving < saving_2)
-            {
-                best_saving = saving_2;
-                favourite = j;
-                fav_j = route_id_j;
-                final_cap = my_demands + j_demand;
-            }
-            if (best_saving == saving_1 || best_saving == saving_2)
+
+            if ((best_saving == saving_1 || best_saving == saving_2) && favourite != j)
             {
                 if (favourite == -1)
                 {
                     favourite = j;
-                    fav_j = route_id_j;
+                    continue;
                 }
-                else if (final_cap > my_demands + j_demand)
+                if (final_cap > my_demands + j_demand)
                 {
                     favourite = j;
-                    fav_j = route_id_j;
                     final_cap = my_demands + j_demand;
                     continue;
                 }
-                else if (final_cap == my_demands + j_demand && fav_j > route_id_j)
-                {
-
-                    favourite = j;
-                    fav_j = route_id_j;
-                }
+                favourite = min(favourite, j);
             }
         }
 
@@ -290,6 +289,7 @@ __global__ void get_pairs(
     const weight_t *dist_to_depot,
     node_t *store_i,
     node_t *store_j,
+
     unsigned int last_index)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -299,33 +299,34 @@ __global__ void get_pairs(
     {
         if (crush[i] == -1)
             continue;
-    }
 
-    int j = crush[i];
-    if (crush[j] != i)
-        continue;
-
-    node_t route_id_i = customer_route_map[i];
-    node_t route_id_j = customer_route_map[j];
-    node_t head_i = route_head[route_id_i];
-    node_t tail_i = route_tail[route_id_i];
-    node_t head_j = route_head[route_id_j];
-    node_t tail_j = route_tail[route_id_j];
-    double saving_1 = dist_to_depot[tail_i] + dist_to_depot[head_j] - device_euclidean_dist(nodes[tail_i], nodes[head_j]);
-    double saving_2 = dist_to_depot[tail_j] + dist_to_depot[head_i] - device_euclidean_dist(nodes[tail_j], nodes[head_i]);
-    if (saving_1 < saving_2)
-    {
-        continue;
-    }
-    if (saving_1 == saving_2)
-    {
-        if (i > j)
+        int j = crush[i];
+        if (crush[j] != i)
             continue;
+
+        node_t route_id_i = customer_route_map[i];
+        node_t route_id_j = customer_route_map[j];
+        node_t head_i = route_head[route_id_i];
+        node_t tail_i = route_tail[route_id_i];
+        node_t head_j = route_head[route_id_j];
+        node_t tail_j = route_tail[route_id_j];
+        double saving_1 = dist_to_depot[tail_i] + dist_to_depot[head_j] - device_euclidean_dist(nodes[tail_i], nodes[head_j]);
+        double saving_2 = dist_to_depot[tail_j] + dist_to_depot[head_i] - device_euclidean_dist(nodes[tail_j], nodes[head_i]);
+
+        if (saving_1 < saving_2)
+        {
+            continue;
+        }
+        if (saving_1 == saving_2)
+        {
+            if (i > j)
+                continue;
+        }
+
+        int old_pos = atomicAdd((unsigned int *)&global_counter, (unsigned int)1);
+        store_i[old_pos] = i;
+        store_j[old_pos] = j;
     }
-    int old_pos = atomicAdd((unsigned int *)&global_counter, (unsigned int)1);
-    store_i[old_pos] = i;
-    store_j[old_pos] = j;
-}
 }
 
 __global__ void merging(
@@ -335,15 +336,10 @@ __global__ void merging(
     weight_t *route_demands,
     node_t *route_head,
     node_t *route_tail,
-    node_t *next_customer,
-    unsigned int *holding_global_counter)
+    node_t *next_customer)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int total_threads = gridDim.x * blockDim.x;
-    if (tid == 0)
-    {
-        *holding_global_counter = global_counter;
-    }
     for (int curr = tid; curr < global_counter; curr += total_threads)
     {
         node_t i = store_i[curr];
@@ -367,11 +363,11 @@ __global__ void cleanup(
     node_t *customer_route_map,
     node_t *crush,
     unsigned int last_index,
-    unsigned int *slow_pointer, weight_t *Total_Cost)
+    unsigned int *slow_pointer)
 {
     *slow_pointer = 0;
     global_counter = 0;
-    *Total_Cost = 0;
+    global_counter_reverse_list = 0;
     for (int i = 1; i <= last_index; i++)
     {
         if (customer_route_map[i] != -1)
@@ -383,8 +379,6 @@ __global__ void cleanup(
     }
 }
 
-std::vector<std::vector<std::pair<node_t, node_t>>> mergings;
-std::vector<weight_t> costs;
 std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
 {
     const int NUM_CUSTOMERS = vrp.getSize() - 1; // Exclude depot
@@ -396,13 +390,8 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
     std::vector<node_t> h_route_head(NUM_CUSTOMERS + 1);
     std::vector<node_t> h_route_tail(NUM_CUSTOMERS + 1);
     std::vector<node_t> h_next_customer(vrp.size, DEPOT);
-
     std::vector<node_t> h_crush(vrp.size, -1);
-    std::vector<node_t> h_store_i((NUM_CUSTOMERS) / 2 + 1, -1);
-    std::vector<node_t> h_store_j((NUM_CUSTOMERS) / 2 + 1, -1);
     unsigned int h_slow_pointer = NUM_CUSTOMERS;
-    unsigned int h_holding_global_counter = 0;
-    weight_t h_total_cost = 0.0;
 
     for (int i = 1; i <= NUM_CUSTOMERS; ++i)
     {
@@ -422,12 +411,10 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
     node_t *d_route_tail;
     weight_t *d_dist_to_depot;
     node_t *d_next_customer;
-    weight_t *d_total_cost;
     node_t *d_crush;
     node_t *d_store_i;
     node_t *d_store_j;
     unsigned int *d_slow_pointer;
-    unsigned int *d_holding_global_counter;
 
     dim3 threadsPerBlock(1024);
     dim3 numBlocks((int)(NUM_CUSTOMERS + threadsPerBlock.x - 1) / threadsPerBlock.x);
@@ -435,19 +422,15 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
 
     checkCudaErrors(cudaMalloc(&d_nodes, (NUM_CUSTOMERS + 1) * sizeof(Point)));
     checkCudaErrors(cudaMalloc(&d_customer_route_map, (NUM_CUSTOMERS + 1) * sizeof(node_t)));
-    checkCudaErrors(cudaMalloc(&d_temp_customer_route_map, (NUM_CUSTOMERS + 1) * sizeof(node_t)));
     checkCudaErrors(cudaMalloc(&d_route_demands, (NUM_CUSTOMERS + 1) * sizeof(demand_t)));
     checkCudaErrors(cudaMalloc(&d_route_head, (NUM_CUSTOMERS + 1) * sizeof(node_t)));
     checkCudaErrors(cudaMalloc(&d_route_tail, (NUM_CUSTOMERS + 1) * sizeof(node_t)));
     checkCudaErrors(cudaMalloc(&d_dist_to_depot, (NUM_CUSTOMERS + 1) * sizeof(weight_t)));
     checkCudaErrors(cudaMalloc(&d_next_customer, (NUM_CUSTOMERS + 1) * sizeof(node_t)));
-    checkCudaErrors(cudaMalloc(&d_total_cost, sizeof(weight_t)));
     checkCudaErrors(cudaMalloc(&d_crush, (NUM_CUSTOMERS + 1) * sizeof(node_t)));
     checkCudaErrors(cudaMalloc(&d_store_i, ((NUM_CUSTOMERS) / 2 + 1) * sizeof(node_t)));
     checkCudaErrors(cudaMalloc(&d_store_j, ((NUM_CUSTOMERS) / 2 + 1) * sizeof(node_t)));
     checkCudaErrors(cudaMalloc(&d_slow_pointer, sizeof(unsigned int)));
-    checkCudaErrors(cudaMalloc(&d_holding_global_counter, sizeof(unsigned int)));
-    checkCudaErrors(cudaMalloc(&d_index, sizeof(unsigned int)));
 
     // --- 3. HOST -> DEVICE: Copy data to GPU ---
     checkCudaErrors(cudaMemcpy(d_nodes, vrp.node.data(), (NUM_CUSTOMERS + 1) * sizeof(Point), cudaMemcpyHostToDevice));
@@ -457,11 +440,8 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
     checkCudaErrors(cudaMemcpy(d_route_tail, h_route_tail.data(), (NUM_CUSTOMERS + 1) * sizeof(node_t), cudaMemcpyHostToDevice));
     checkCudaErrors(cudaMemcpy(d_dist_to_depot, vrp.dist_to_depot.data(), (NUM_CUSTOMERS + 1) * sizeof(weight_t), cudaMemcpyHostToDevice));
     checkCudaErrors(cudaMemcpy(d_next_customer, h_next_customer.data(), (NUM_CUSTOMERS + 1) * sizeof(node_t), cudaMemcpyHostToDevice));
-
     checkCudaErrors(cudaMemcpy(d_crush, h_crush.data(), (NUM_CUSTOMERS + 1) * sizeof(node_t), cudaMemcpyHostToDevice));
     checkCudaErrors(cudaMemcpy(d_slow_pointer, &h_slow_pointer, sizeof(unsigned int), cudaMemcpyHostToDevice));
-    checkCudaErrors(cudaMemcpy(d_total_cost, &h_total_cost, sizeof(weight_t), cudaMemcpyHostToDevice));
-    checkCudaErrors(cudaMemcpy(d_index, &h_index, sizeof(unsigned int), cudaMemcpyHostToDevice));
 
     int id = 0;
     unsigned int last_index = NUM_CUSTOMERS;
@@ -487,22 +467,14 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
         get_pairs<<<numBlocks, threadsPerBlock>>>(
             d_nodes,
             d_customer_route_map,
-            d_temp_customer_route_map,
             d_route_head,
             d_route_tail,
             d_crush,
             d_dist_to_depot,
             d_store_i,
             d_store_j,
-            last_index, d_index);
+            last_index);
 
-        if (vrp.verbose)
-        {
-            checkCudaErrors(cudaMemcpy(h_store_i.data(), d_store_i, ((NUM_CUSTOMERS) / 2 + 1) * sizeof(node_t), cudaMemcpyDeviceToHost));
-            checkCudaErrors(cudaMemcpy(h_store_j.data(), d_store_j, ((NUM_CUSTOMERS) / 2 + 1) * sizeof(node_t), cudaMemcpyDeviceToHost));
-            checkCudaErrors(cudaMemcpy(h_customer_route_map.data(), d_customer_route_map, (NUM_CUSTOMERS + 1) * sizeof(node_t), cudaMemcpyDeviceToHost));
-            checkCudaErrors(cudaMemcpy(h_route_tail.data(), d_route_tail, (NUM_CUSTOMERS + 1) * sizeof(node_t), cudaMemcpyDeviceToHost));
-        }
         merging<<<numBlocks, threadsPerBlock>>>(
             d_store_i,
             d_store_j,
@@ -510,42 +482,31 @@ std::vector<std::vector<node_t>> parallel_savings_algorithm(const VRP &vrp)
             d_route_demands,
             d_route_head,
             d_route_tail,
-            d_next_customer,
-            d_holding_global_counter);
+            d_next_customer);
 
-        if (vrp.verbose)
-        {
-
-            std::vector<std::pair<node_t, node_t>> temp;
-            checkCudaErrors(cudaMemcpy(&h_holding_global_counter, d_holding_global_counter, sizeof(unsigned int), cudaMemcpyDeviceToHost));
-            for (int i = 0; i < h_holding_global_counter; i++)
-            {
-
-                temp.push_back({h_route_tail[h_customer_route_map[h_store_i[i]]], h_customer_route_map[h_store_j[i]]});
-            }
-            mergings.push_back(temp);
-        }
+        cleanup<<<1, 1>>>(
+            d_customer_route_map,
+            d_crush,
+            last_index,
+            d_slow_pointer);
 
         checkCudaErrors(cudaDeviceSynchronize());
-        checkCudaErrors(cudaMemcpy(&h_index, d_index, sizeof(unsigned int), cudaMemcpyDeviceToHost));
-        cleanup<<<1, 1>>>(
-            d_index);
+        checkCudaErrors(cudaMemcpy(&h_slow_pointer, d_slow_pointer, sizeof(unsigned int), cudaMemcpyDeviceToHost));
 
-        std::swap(d_customer_route_map, d_temp_customer_route_map);
-        if (h_index == last_index + 1)
+        // std::cout << h_slow_pointer << " , " << last_index << "\n";
+        if (h_slow_pointer == last_index)
         {
             std::cout << "No more positive savings found. Halting." << std::endl;
             std::cout << id << "\n";
             break; // Exit the while loop
         }
-        last_index = h_index - 1;
+        last_index = h_slow_pointer;
         if (id == 1)
         {
             en = std::chrono::high_resolution_clock::now();
             std::chrono::duration<double> elapsed = en - st;
             std::cout << "Time for first iteration: " << elapsed.count() << " seconds\n";
         }
-        checkCudaErrors(cudaDeviceSynchronize());
     }
     std::cout << "loop ended\n";
 
@@ -591,7 +552,6 @@ void tsp_approx(const VRP &vrp, std::vector<node_t> &cities, std::vector<node_t>
     node_t i, j;
     node_t ClosePt = 0;
     weight_t CloseDist;
-
     //~ node_t endtour=0;
 
     for (i = 1; i < ncities; i++)
@@ -851,21 +811,7 @@ postProcessIt(const VRP &vrp, std::vector<std::vector<node_t>> &final_routes, we
 
     return postprocessed_final_routes;
 }
-std::string get_base_name(const std::string &path)
-{
-    // Find the last path separator (works for both / and \)
-    size_t last_slash_idx = path.find_last_of("/\\");
-    std::string filename = (last_slash_idx == std::string::npos) ? path : path.substr(last_slash_idx + 1);
 
-    // Find the last period (to remove extension)
-    size_t period_idx = filename.rfind('.');
-    if (period_idx != std::string::npos && period_idx != 0)
-    { // Avoid cases like ".hiddenfile"
-        filename = filename.substr(0, period_idx);
-    }
-
-    return filename;
-}
 int main(int argc, char *argv[])
 {
     if (argc < 2)
@@ -890,8 +836,6 @@ int main(int argc, char *argv[])
     // default
     VRP::isRound = false;
 
-    VRP::verbose = false;
-
     // parse arguments
     for (int i = 2; i < argc; i++)
     {
@@ -901,39 +845,17 @@ int main(int argc, char *argv[])
             VRP::isRound = (std::stoi(argv[i + 1]) == 1);
             i++;
         }
-        if (arg == "-verbose")
-        {
-            VRP::verbose = (std::stoi(argv[i + 1]) == 1);
-            ;
-            i++;
-        }
     }
 
     auto start_time = std::chrono::high_resolution_clock::now();
     std::vector<std::vector<node_t>> routes = parallel_savings_algorithm(vrp);
     auto end_time = std::chrono::high_resolution_clock::now();
 
-    if (vrp.verbose)
-    {
-
-        std::string filename = argv[1];
-        filename = get_base_name(filename) + ".edges";
-        std::ofstream out(filename);
-        for (auto &p : mergings)
-        {
-            for (auto &item : p)
-                out << item.first << " " << item.second << "\n";
-            out << "commit\n";
-        }
-        out.close();
-    }
-
     std::chrono::duration<double> elapsed = end_time - start_time;
     weight_t total_cost = calCost(vrp, routes);
     std::cout << "--- Parallel Clarke & Wright Savings Algorithm ---" << std::endl;
     std::cout << "Problem File: " << argv[1] << std::endl;
     std::cout << "--------------------------------------------------" << std::endl;
-    std::cout << std::fixed << std::setprecision(2);
     std::cout << "Before preprosess Solution Cost: " << total_cost << std::endl;
 
     auto local_search_start = std::chrono::high_resolution_clock::now();

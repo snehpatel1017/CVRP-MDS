@@ -1,0 +1,108 @@
+Number of Customers: 75
+Merging pairs: 
+25 , 55
+65 , 66
+42 , 64
+60 , 70
+Time for first iteration: 0.000415604 seconds
+Merging pairs: 
+55 , 18
+66 , 59
+71 , 60
+41 , 42
+Merging pairs: 
+18 , 50
+43 , 41
+59 , 14
+70 , 20
+Merging pairs: 
+38 , 65
+64 , 22
+23 , 56
+24 , 49
+31 , 25
+69 , 71
+Merging pairs: 
+36 , 69
+10 , 31
+11 , 38
+56 , 43
+Merging pairs: 
+20 , 37
+14 , 19
+22 , 61
+Merging pairs: 
+15 , 57
+35 , 53
+47 , 36
+Merging pairs: 
+13 , 54
+61 , 21
+37 , 5
+Merging pairs: 
+50 , 24
+28 , 62
+5 , 15
+63 , 23
+Merging pairs: 
+48 , 47
+58 , 10
+74 , 28
+1 , 73
+3 , 44
+9 , 39
+Merging pairs: 
+27 , 13
+32 , 9
+57 , 29
+49 , 16
+62 , 1
+Merging pairs: 
+54 , 8
+39 , 72
+73 , 33
+Merging pairs: 
+2 , 74
+44 , 32
+8 , 35
+Merging pairs: 
+72 , 12
+53 , 7
+30 , 2
+Merging pairs: 
+40 , 3
+52 , 27
+21 , 68
+Merging pairs: 
+17 , 40
+34 , 52
+45 , 30
+Merging pairs: 
+6 , 51
+46 , 34
+Merging pairs: 
+4 , 75
+26 , 67
+Merging pairs: 
+67 , 4
+Merging pairs: 
+75 , 6
+Merging pairs: 
+No more positive savings found. Halting.
+21
+loop ended
+memory copied back to host
+routes generated
+--- Parallel Clarke & Wright Savings Algorithm ---
+Problem File: ./inputs/E-n76-k8.vrp
+--------------------------------------------------
+Before preprosess Solution Cost: 781.00
+Total Solution Cost: 776.00
+Number of Routes:   8
+Parrallel Clarke and Wright Time : 1.79
+Local Search Time: 0.00 seconds
+Total Time Taken:    1.79 seconds
+Solution Validity:   VALID
+--------------------------------------------------
+[cs24m048@login04 Testing_Ground]$ 
+

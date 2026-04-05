@@ -92,7 +92,8 @@ public:
 		   int nbVeh,
 		   bool isDurationConstraint,
 		   bool verbose,
-		   const AlgorithmParameters &ap);
+		   const AlgorithmParameters &ap,
+		   const std::vector<std::set<int>> &setCorrelatedVertices);
 
 	double getDist(const int &i, const int &j, bool isRoundingInteger = true) const
 	{

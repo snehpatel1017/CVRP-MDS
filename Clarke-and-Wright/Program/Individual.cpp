@@ -25,13 +25,11 @@ void Individual::evaluateCompleteCost(const Params &params)
 			eval.nbRoutes++;
 			if (load > params.vehicleCapacity)
 				eval.capacityExcess += load - params.vehicleCapacity;
-			if (distance + service > params.durationLimit)
-				eval.durationExcess += distance + service - params.durationLimit;
 		}
 	}
 
-	eval.penalizedCost = eval.distance + eval.capacityExcess * params.penaltyCapacity + eval.durationExcess * params.penaltyDuration;
-	eval.isFeasible = (eval.capacityExcess < MY_EPSILON && eval.durationExcess < MY_EPSILON);
+	eval.penalizedCost = eval.distance + eval.capacityExcess * params.penaltyCapacity;
+	eval.isFeasible = (eval.capacityExcess < MY_EPSILON);
 }
 
 Individual::Individual(Params &params)
@@ -48,6 +46,7 @@ Individual::Individual(Params &params)
 
 Individual::Individual(Params &params, std::vector<std::vector<int>> &sol) : Individual(params)
 {
+
 	for (int r = 0; r < sol.size(); r++)
 	{
 		for (auto x : sol[r])

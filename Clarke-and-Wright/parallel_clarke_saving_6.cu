@@ -69,7 +69,6 @@ void VRP::read(const std::string &filename)
         std::cerr << "Error: Could not open file " << filename << std::endl;
         exit(1);
     }
-
     std::string line;
     while (getline(in, line) && line.find("DIMENSION") == std::string::npos)
         ;
@@ -190,6 +189,7 @@ __device__ double device_euclidean_dist(const Point &a, const Point &b)
 }
 
 __device__ volatile unsigned int global_counter = 0;
+
 // __device__ volatile unsigned long long int global_counter_2 = 0;
 
 __global__ void find_buddy_per_node(
